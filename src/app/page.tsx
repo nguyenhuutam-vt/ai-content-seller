@@ -1,6 +1,6 @@
 "use client";
 
-import { type FormEvent, useState } from "react";
+import { type FormEvent, type ReactNode, useState } from "react";
 
 const features = [
   {
@@ -41,8 +41,19 @@ const plans = [
 
 const stats = ["Caption", "Hashtag", "Mô tả", "CTA"];
 
+const navLinks = [
+  { href: "#features", label: "Tính năng" },
+  { href: "#pricing", label: "Bảng giá" },
+  { href: "#demo", label: "Demo" },
+  { href: "#generator", label: "Generator" },
+] as const;
+
 const platforms = ["Shopee", "TikTok Shop", "Facebook"] as const;
 const tones = ["Chuyên nghiệp", "Gen Z", "Sang trọng", "Viral"] as const;
+const MIN_PRODUCT_NAME_LENGTH = 3;
+const MAX_PRODUCT_NAME_LENGTH = 120;
+const HASHTAG_MIN_COUNT = 5;
+const HASHTAG_MAX_COUNT = 8;
 
 const generatorSteps = [
   "Nhập sản phẩm",
@@ -51,12 +62,29 @@ const generatorSteps = [
   "Tạo bản nháp",
 ] as const;
 
+const previewItems = [
+  {
+    title: "Caption",
+    body: "Nhỏ gọn nhưng đựng đủ đồ cần thiết. Đi học, đi làm hay đi chơi cuối tuần đều hợp.",
+  },
+  {
+    title: "CTA",
+    body: "Chọn màu bạn thích và đặt ngay hôm nay.",
+  },
+] as const;
+
+const fieldLabelClassName = "text-xs font-black uppercase text-zinc-500";
+const formControlClassName =
+  "mt-3 h-14 w-full rounded-lg border border-white/10 bg-white/[0.045] px-5 text-sm font-semibold text-white outline-none transition duration-300 hover:border-yellow-300/35 hover:bg-white/[0.06] focus:border-yellow-300 focus:bg-black/80 focus:shadow-[0_0_0_4px_rgba(250,204,21,0.12),0_18px_45px_rgba(250,204,21,0.08)]";
+
 type Platform = (typeof platforms)[number];
 type Tone = (typeof tones)[number];
+type Feature = (typeof features)[number];
+type Plan = (typeof plans)[number];
 
 type GeneratedContent = {
   caption: string;
-  hashtags: string;
+  hashtags: string[];
   cta: string;
   description: string;
 };
@@ -72,6 +100,7 @@ function GeneratorDemoSection() {
   const [isLoading, setIsLoading] = useState(false);
   const [content, setContent] = useState<GeneratedContent | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [productNameError, setProductNameError] = useState<string | null>(null);
 
   async function handleGenerate(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -80,9 +109,19 @@ function GeneratorDemoSection() {
       return;
     }
 
+    const nextProductNameError = getProductNameError(productName);
+
+    if (nextProductNameError) {
+      setContent(null);
+      setErrorMessage(null);
+      setProductNameError(nextProductNameError);
+      return;
+    }
+
     setIsLoading(true);
     setContent(null);
     setErrorMessage(null);
+    setProductNameError(null);
 
     try {
       const response = await fetch("/api/generate", {
@@ -141,17 +180,7 @@ function GeneratorDemoSection() {
             <div className="absolute inset-x-8 top-0 h-px bg-gradient-to-r from-transparent via-yellow-200 to-transparent" />
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
               {generatorSteps.map((step, index) => (
-                <div
-                  key={step}
-                  className="group rounded-lg border border-white/10 bg-white/[0.035] px-4 py-4 transition duration-500 ease-out hover:-translate-y-0.5 hover:border-yellow-300/45 hover:bg-yellow-300/[0.08] hover:shadow-[0_18px_50px_rgba(250,204,21,0.16)]"
-                >
-                  <span className="text-xs font-black text-yellow-300/80">
-                    0{index + 1}
-                  </span>
-                  <p className="mt-2 text-sm font-bold text-zinc-200 transition duration-500 group-hover:text-yellow-100">
-                    {step}
-                  </p>
-                </div>
+                <GeneratorStepCard key={step} step={step} index={index} />
               ))}
             </div>
           </div>
@@ -167,44 +196,63 @@ function GeneratorDemoSection() {
 
             <div className="relative flex items-center justify-between gap-4 border-b border-white/10 pb-5">
               <div>
-                <p className="text-sm font-black text-yellow-200">
-                  Input brief
-                </p>
-                <p className="mt-1 text-xs font-semibold text-zinc-500">
-                  Gọi OpenAI qua API route server-side
-                </p>
+                <PanelTitle
+                  title="Input brief"
+                  description=""
+                />
               </div>
-              <span className="rounded-lg border border-yellow-300/25 bg-yellow-300/10 px-3 py-1 text-xs font-black text-yellow-100 shadow-[0_0_28px_rgba(250,204,21,0.14)]">
+              <StatusPill className="border-yellow-300/25 bg-yellow-300/10 text-yellow-100 shadow-[0_0_28px_rgba(250,204,21,0.14)]">
                 Live demo
-              </span>
+              </StatusPill>
             </div>
 
             <div className="relative mt-7 space-y-5">
               <label className="block">
-                <span className="text-xs font-black uppercase text-zinc-500">
-                  Product name
-                </span>
+                <span className={fieldLabelClassName}>Product name</span>
                 <input
                   value={productName}
-                  onChange={(event) => setProductName(event.target.value)}
+                  onChange={(event) => {
+                    const nextProductName = event.target.value;
+
+                    setProductName(nextProductName);
+
+                    if (productNameError) {
+                      setProductNameError(getProductNameError(nextProductName));
+                    }
+                  }}
                   placeholder="Ví dụ: Nến thơm thư giãn hương gỗ"
-                  required
-                  maxLength={120}
-                  className="mt-3 h-14 w-full rounded-lg border border-white/10 bg-white/[0.045] px-5 text-sm font-semibold text-white outline-none transition duration-300 placeholder:text-zinc-600 hover:border-yellow-300/35 hover:bg-white/[0.06] focus:border-yellow-300 focus:bg-black/80 focus:shadow-[0_0_0_4px_rgba(250,204,21,0.12),0_18px_45px_rgba(250,204,21,0.08)]"
+                  aria-describedby={
+                    productNameError
+                      ? "product-name-help product-name-error"
+                      : "product-name-help"
+                  }
+                  aria-invalid={Boolean(productNameError)}
+                  className={`${formControlClassName} placeholder:text-zinc-600`}
                 />
+                <p
+                  id="product-name-help"
+                  className="mt-2 text-xs font-medium leading-5 text-zinc-500"
+                >
+                </p>
+                {productNameError ? (
+                  <p
+                    id="product-name-error"
+                    className="mt-2 text-xs font-bold leading-5 text-red-200"
+                  >
+                    {productNameError}
+                  </p>
+                ) : null}
               </label>
 
               <div className="grid gap-5 sm:grid-cols-2">
                 <label className="block">
-                  <span className="text-xs font-black uppercase text-zinc-500">
-                    Platform
-                  </span>
+                  <span className={fieldLabelClassName}>Platform</span>
                   <select
                     value={platform}
                     onChange={(event) =>
                       setPlatform(event.target.value as Platform)
                     }
-                    className="mt-3 h-14 w-full rounded-lg border border-white/10 bg-white/[0.045] px-5 text-sm font-semibold text-white outline-none transition duration-300 hover:border-yellow-300/35 hover:bg-white/[0.06] focus:border-yellow-300 focus:bg-black/80 focus:shadow-[0_0_0_4px_rgba(250,204,21,0.12),0_18px_45px_rgba(250,204,21,0.08)]"
+                    className={formControlClassName}
                   >
                     {platforms.map((item) => (
                       <option key={item}>{item}</option>
@@ -213,13 +261,11 @@ function GeneratorDemoSection() {
                 </label>
 
                 <label className="block">
-                  <span className="text-xs font-black uppercase text-zinc-500">
-                    Tone
-                  </span>
+                  <span className={fieldLabelClassName}>Tone</span>
                   <select
                     value={tone}
                     onChange={(event) => setTone(event.target.value as Tone)}
-                    className="mt-3 h-14 w-full rounded-lg border border-white/10 bg-white/[0.045] px-5 text-sm font-semibold text-white outline-none transition duration-300 hover:border-yellow-300/35 hover:bg-white/[0.06] focus:border-yellow-300 focus:bg-black/80 focus:shadow-[0_0_0_4px_rgba(250,204,21,0.12),0_18px_45px_rgba(250,204,21,0.08)]"
+                    className={formControlClassName}
                   >
                     {tones.map((item) => (
                       <option key={item}>{item}</option>
@@ -249,18 +295,18 @@ function GeneratorDemoSection() {
 
             <div className="relative flex flex-col gap-4 border-b border-white/10 pb-5 sm:flex-row sm:items-center sm:justify-between">
               <div>
-                <p className="text-sm font-black text-yellow-200">AI output</p>
-                <p className="mt-1 text-xs font-semibold text-zinc-500">
-                  Caption, hashtag, CTA và mô tả
-                </p>
+                <PanelTitle
+                  title="AI output"
+                  description="Caption, hashtag, CTA và mô tả"
+                />
               </div>
               <div className="flex flex-wrap gap-2">
-                <span className="rounded-lg border border-white/10 bg-white px-3 py-1 text-xs font-black text-black shadow-[0_12px_34px_rgba(255,255,255,0.12)]">
+                <StatusPill className="border-white/10 bg-white text-black shadow-[0_12px_34px_rgba(255,255,255,0.12)]">
                   {platform}
-                </span>
-                <span className="rounded-lg border border-yellow-300/25 bg-yellow-300/10 px-3 py-1 text-xs font-black text-yellow-100">
+                </StatusPill>
+                <StatusPill className="border-yellow-300/25 bg-yellow-300/10 text-yellow-100">
                   {tone}
-                </span>
+                </StatusPill>
               </div>
             </div>
 
@@ -279,18 +325,7 @@ function GeneratorDemoSection() {
                   </p>
                 </div>
               ) : isLoading ? (
-                <div className="relative mt-6 space-y-4">
-                  {[1, 2, 3, 4].map((item) => (
-                    <div
-                      key={item}
-                      className="overflow-hidden rounded-lg border border-white/10 bg-white/[0.045] p-5"
-                    >
-                      <div className="h-3 w-24 animate-pulse rounded-full bg-yellow-300/30" />
-                      <div className="mt-5 h-3 w-full animate-pulse rounded-full bg-white/10" />
-                      <div className="mt-3 h-3 w-4/5 animate-pulse rounded-full bg-white/10" />
-                    </div>
-                  ))}
-                </div>
+                <OutputLoadingSkeleton />
               ) : content ? (
                 <div className="relative mt-6 grid gap-4">
                   <OutputBlock
@@ -299,7 +334,10 @@ function GeneratorDemoSection() {
                     featured
                   />
                   <div className="grid gap-4 sm:grid-cols-2">
-                    <OutputBlock title="Hashtags" body={content.hashtags} />
+                    <OutputBlock
+                      title="Hashtags"
+                      body={content.hashtags.join(" ")}
+                    />
                     <OutputBlock title="CTA" body={content.cta} />
                   </div>
                   <OutputBlock
@@ -324,6 +362,71 @@ function GeneratorDemoSection() {
         </div>
       </div>
     </section>
+  );
+}
+
+function PanelTitle({
+  title,
+  description,
+}: {
+  title: string;
+  description: string;
+}) {
+  return (
+    <>
+      <p className="text-sm font-black text-yellow-200">{title}</p>
+      <p className="mt-1 text-xs font-semibold text-zinc-500">{description}</p>
+    </>
+  );
+}
+
+function StatusPill({
+  children,
+  className,
+}: {
+  children: ReactNode;
+  className: string;
+}) {
+  return (
+    <span className={`rounded-lg border px-3 py-1 text-xs font-black ${className}`}>
+      {children}
+    </span>
+  );
+}
+
+function GeneratorStepCard({
+  step,
+  index,
+}: {
+  step: string;
+  index: number;
+}) {
+  return (
+    <div className="group rounded-lg border border-white/10 bg-white/[0.035] px-4 py-4 transition duration-500 ease-out hover:-translate-y-0.5 hover:border-yellow-300/45 hover:bg-yellow-300/[0.08] hover:shadow-[0_18px_50px_rgba(250,204,21,0.16)]">
+      <span className="text-xs font-black text-yellow-300/80">
+        0{index + 1}
+      </span>
+      <p className="mt-2 text-sm font-bold text-zinc-200 transition duration-500 group-hover:text-yellow-100">
+        {step}
+      </p>
+    </div>
+  );
+}
+
+function OutputLoadingSkeleton() {
+  return (
+    <div className="relative mt-6 space-y-4">
+      {[1, 2, 3, 4].map((item) => (
+        <div
+          key={item}
+          className="overflow-hidden rounded-lg border border-white/10 bg-white/[0.045] p-5"
+        >
+          <div className="h-3 w-24 animate-pulse rounded-full bg-yellow-300/30" />
+          <div className="mt-5 h-3 w-full animate-pulse rounded-full bg-white/10" />
+          <div className="mt-3 h-3 w-4/5 animate-pulse rounded-full bg-white/10" />
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -403,6 +506,24 @@ function getGenerateErrorMessage(data: GenerateResponse) {
     : "Không thể tạo nội dung. Vui lòng thử lại.";
 }
 
+function getProductNameError(productName: string) {
+  const trimmedProductName = productName.trim();
+
+  if (!trimmedProductName) {
+    return "Vui lòng nhập tên sản phẩm.";
+  }
+
+  if (trimmedProductName.length < MIN_PRODUCT_NAME_LENGTH) {
+    return `Tên sản phẩm cần ít nhất ${MIN_PRODUCT_NAME_LENGTH} ký tự.`;
+  }
+
+  if (trimmedProductName.length > MAX_PRODUCT_NAME_LENGTH) {
+    return `Tên sản phẩm tối đa ${MAX_PRODUCT_NAME_LENGTH} ký tự.`;
+  }
+
+  return null;
+}
+
 function isGeneratedContent(value: GenerateResponse): value is GeneratedContent {
   return (
     "caption" in value &&
@@ -410,7 +531,12 @@ function isGeneratedContent(value: GenerateResponse): value is GeneratedContent 
     "cta" in value &&
     "description" in value &&
     typeof value.caption === "string" &&
-    typeof value.hashtags === "string" &&
+    Array.isArray(value.hashtags) &&
+    value.hashtags.length >= HASHTAG_MIN_COUNT &&
+    value.hashtags.length <= HASHTAG_MAX_COUNT &&
+    value.hashtags.every(
+      (hashtag) => typeof hashtag === "string" && hashtag.trim().length > 0,
+    ) &&
     typeof value.cta === "string" &&
     typeof value.description === "string"
   );
@@ -425,18 +551,11 @@ export default function Home() {
             AI<span className="text-yellow-300">Content</span>Seller
           </a>
           <nav className="hidden items-center gap-8 text-sm font-semibold text-zinc-300 md:flex">
-            <a href="#features" className="transition hover:text-yellow-300">
-              Tính năng
-            </a>
-            <a href="#pricing" className="transition hover:text-yellow-300">
-              Bảng giá
-            </a>
-            <a href="#demo" className="transition hover:text-yellow-300">
-              Demo
-            </a>
-            <a href="#generator" className="transition hover:text-yellow-300">
-              Generator
-            </a>
+            {navLinks.map((link) => (
+              <NavLink key={link.href} href={link.href}>
+                {link.label}
+              </NavLink>
+            ))}
           </nav>
         </div>
       </header>
@@ -511,19 +630,9 @@ export default function Home() {
                 </div>
 
                 <div className="grid gap-4 sm:grid-cols-2">
-                  <div className="rounded-2xl border border-white/10 bg-white/[0.06] p-4">
-                    <p className="text-xs font-bold text-yellow-300">Caption</p>
-                    <p className="mt-3 text-sm leading-6 text-zinc-200">
-                      Nhỏ gọn nhưng đựng đủ đồ cần thiết. Đi học, đi làm hay đi
-                      chơi cuối tuần đều hợp.
-                    </p>
-                  </div>
-                  <div className="rounded-2xl border border-white/10 bg-white/[0.06] p-4">
-                    <p className="text-xs font-bold text-yellow-300">CTA</p>
-                    <p className="mt-3 text-sm leading-6 text-zinc-200">
-                      Chọn màu bạn thích và đặt ngay hôm nay.
-                    </p>
-                  </div>
+                  {previewItems.map((item) => (
+                    <PreviewContentCard key={item.title} item={item} />
+                  ))}
                 </div>
 
                 <div className="rounded-2xl border border-white/10 bg-white p-4 text-black">
@@ -555,15 +664,7 @@ export default function Home() {
 
           <div className="mt-10 grid gap-5 md:grid-cols-3">
             {features.map((feature) => (
-              <article
-                key={feature.title}
-                className="rounded-3xl border-2 border-black bg-white p-6 shadow-[8px_8px_0_#000]"
-              >
-                <h3 className="text-2xl font-black">{feature.title}</h3>
-                <p className="mt-4 text-sm font-medium leading-6 text-zinc-700">
-                  {feature.description}
-                </p>
-              </article>
+              <FeatureCard key={feature.title} feature={feature} />
             ))}
           </div>
         </div>
@@ -580,53 +681,90 @@ export default function Home() {
             </h2>
           </div>
           <p className="text-base leading-7 text-zinc-400">
-            Bảng giá xem trước cho landing page. Chưa có backend, auth, database
-            hoặc payment.
           </p>
         </div>
 
         <div className="mt-10 grid gap-5 md:grid-cols-3">
           {plans.map((plan) => (
-            <article
-              key={plan.name}
-              className={`group rounded-3xl border p-6 transition-all duration-300 ease-out hover:-translate-y-2 ${
-                plan.highlighted
-                  ? "border-yellow-300 bg-yellow-300 text-black shadow-[0_0_55px_rgba(250,204,21,0.24)] hover:scale-[1.02] hover:shadow-[0_0_85px_rgba(250,204,21,0.36)]"
-                  : "border-white/10 bg-white/[0.06] text-white hover:border-yellow-300 hover:bg-yellow-300 hover:text-black hover:shadow-[0_0_55px_rgba(250,204,21,0.22)]"
-              }`}
-            >
-              <div className="flex items-center justify-between gap-3">
-                <h3 className="text-2xl font-black">{plan.name}</h3>
-                {plan.highlighted ? (
-                  <span className="rounded-full bg-black px-3 py-1 text-xs font-black text-yellow-300">
-                    Phổ biến
-                  </span>
-                ) : null}
-              </div>
-              <p className="mt-6 text-4xl font-black">{plan.price}</p>
-              <p
-                className={`mt-4 text-sm font-medium leading-6 transition-colors duration-300 ${
-                  plan.highlighted
-                    ? "text-zinc-800"
-                    : "text-zinc-400 group-hover:text-zinc-800"
-                }`}
-              >
-                {plan.description}
-              </p>
-              <a
-                href="#"
-                className={`mt-7 inline-flex h-12 w-full items-center justify-center rounded-full text-sm font-black transition-all duration-300 ${
-                  plan.highlighted
-                    ? "bg-black text-yellow-300 hover:bg-zinc-900 group-hover:scale-[1.03]"
-                    : "border border-white/15 text-white group-hover:border-black group-hover:bg-black group-hover:text-yellow-300"
-                }`}
-              >
-                Dùng thử miễn phí
-              </a>
-            </article>
+            <PricingCard key={plan.name} plan={plan} />
           ))}
         </div>
       </section>
     </main>
+  );
+}
+
+function NavLink({
+  href,
+  children,
+}: {
+  href: string;
+  children: ReactNode;
+}) {
+  return (
+    <a href={href} className="transition hover:text-yellow-300">
+      {children}
+    </a>
+  );
+}
+
+function PreviewContentCard({ item }: { item: (typeof previewItems)[number] }) {
+  return (
+    <div className="rounded-2xl border border-white/10 bg-white/[0.06] p-4">
+      <p className="text-xs font-bold text-yellow-300">{item.title}</p>
+      <p className="mt-3 text-sm leading-6 text-zinc-200">{item.body}</p>
+    </div>
+  );
+}
+
+function FeatureCard({ feature }: { feature: Feature }) {
+  return (
+    <article className="rounded-3xl border-2 border-black bg-white p-6 shadow-[8px_8px_0_#000]">
+      <h3 className="text-2xl font-black">{feature.title}</h3>
+      <p className="mt-4 text-sm font-medium leading-6 text-zinc-700">
+        {feature.description}
+      </p>
+    </article>
+  );
+}
+
+function PricingCard({ plan }: { plan: Plan }) {
+  return (
+    <article
+      className={`group rounded-3xl border p-6 transition-all duration-300 ease-out hover:-translate-y-2 ${
+        plan.highlighted
+          ? "border-yellow-300 bg-yellow-300 text-black shadow-[0_0_55px_rgba(250,204,21,0.24)] hover:scale-[1.02] hover:shadow-[0_0_85px_rgba(250,204,21,0.36)]"
+          : "border-white/10 bg-white/[0.06] text-white hover:border-yellow-300 hover:bg-yellow-300 hover:text-black hover:shadow-[0_0_55px_rgba(250,204,21,0.22)]"
+      }`}
+    >
+      <div className="flex items-center justify-between gap-3">
+        <h3 className="text-2xl font-black">{plan.name}</h3>
+        {plan.highlighted ? (
+          <span className="rounded-full bg-black px-3 py-1 text-xs font-black text-yellow-300">
+            Phổ biến
+          </span>
+        ) : null}
+      </div>
+      <p className="mt-6 text-4xl font-black">{plan.price}</p>
+      <p
+        className={`mt-4 text-sm font-medium leading-6 transition-colors duration-300 ${
+          plan.highlighted
+            ? "text-zinc-800"
+            : "text-zinc-400 group-hover:text-zinc-800"
+        }`}
+      >
+        {plan.description}
+      </p>
+      <a
+        href="#"
+        className={`mt-7 inline-flex h-12 w-full items-center justify-center rounded-full text-sm font-black transition-all duration-300 ${
+          plan.highlighted
+            ? "bg-black text-yellow-300 hover:bg-zinc-900 group-hover:scale-[1.03]"
+            : "border border-white/15 text-white group-hover:border-black group-hover:bg-black group-hover:text-yellow-300"
+        }`}
+      >
+        Dùng thử miễn phí
+      </a>
+    </article>
   );
 }
