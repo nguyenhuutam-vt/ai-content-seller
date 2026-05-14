@@ -1,6 +1,18 @@
 "use client";
 
-import { type FormEvent, type ReactNode, useState } from "react";
+import {
+  type FormEvent,
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
+
+import {
+  createClient as createSupabaseClient,
+  isSupabaseConfigured,
+} from "@/lib/supabase/client";
 
 const features = [
   {
@@ -54,6 +66,7 @@ const MIN_PRODUCT_NAME_LENGTH = 3;
 const MAX_PRODUCT_NAME_LENGTH = 120;
 const HASHTAG_MIN_COUNT = 5;
 const HASHTAG_MAX_COUNT = 8;
+const RECENT_GENERATION_LIMIT = 5;
 
 const generatorSteps = [
   "Nhập sản phẩm",
@@ -81,6 +94,7 @@ type Platform = (typeof platforms)[number];
 type Tone = (typeof tones)[number];
 type Feature = (typeof features)[number];
 type Plan = (typeof plans)[number];
+type AuthMode = "login" | "signup";
 
 type GeneratedContent = {
   caption: string;
@@ -90,8 +104,41 @@ type GeneratedContent = {
 };
 
 type GenerateResponse = GeneratedContent | { error?: string };
+type SupabaseBrowserClient = ReturnType<typeof createSupabaseClient>;
 
-function GeneratorDemoSection() {
+type RecentGeneration = GeneratedContent & {
+  id: string;
+  product_name: string;
+  platform: string;
+  tone: string;
+  created_at: string | null;
+};
+
+type GenerationInsert = {
+  user_id: string;
+  product_name: string;
+  platform: Platform;
+  tone: Tone;
+  caption: string;
+  hashtags: string[];
+  cta: string;
+  description: string;
+};
+
+type GenerationSaveInput = {
+  productName: string;
+  platform: Platform;
+  tone: Tone;
+  content: GeneratedContent;
+};
+
+function GeneratorDemoSection({
+  supabase,
+  userId,
+}: {
+  supabase: SupabaseBrowserClient | null;
+  userId: string | null;
+}) {
   const [productName, setProductName] = useState(
     "Túi đeo chéo mini chống nước",
   );
@@ -101,6 +148,86 @@ function GeneratorDemoSection() {
   const [content, setContent] = useState<GeneratedContent | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [productNameError, setProductNameError] = useState<string | null>(null);
+  const [recentGenerations, setRecentGenerations] = useState<
+    RecentGeneration[]
+  >([]);
+  const [isHistoryLoading, setIsHistoryLoading] = useState(false);
+  const [historyErrorMessage, setHistoryErrorMessage] = useState<string | null>(
+    null,
+  );
+
+  const fetchRecentGenerations = useCallback(async () => {
+    if (!supabase || !userId) {
+      setRecentGenerations([]);
+      setHistoryErrorMessage(null);
+      setIsHistoryLoading(false);
+      return;
+    }
+
+    setIsHistoryLoading(true);
+    setHistoryErrorMessage(null);
+
+    const { data, error } = await supabase
+      .from("generations")
+      .select(
+        "id, product_name, platform, tone, caption, hashtags, cta, description, created_at",
+      )
+      .eq("user_id", userId)
+      .order("created_at", { ascending: false })
+      .limit(RECENT_GENERATION_LIMIT)
+      .returns<RecentGeneration[]>();
+
+    setIsHistoryLoading(false);
+
+    if (error) {
+      console.error("Supabase generations select error", error.message);
+      setRecentGenerations([]);
+      setHistoryErrorMessage("Không tải được lịch sử gần đây.");
+      return;
+    }
+
+    setRecentGenerations(data ?? []);
+  }, [supabase, userId]);
+
+  useEffect(() => {
+    void fetchRecentGenerations();
+  }, [fetchRecentGenerations]);
+
+  async function saveGeneratedContent({
+    productName: savedProductName,
+    platform: savedPlatform,
+    tone: savedTone,
+    content: generatedContent,
+  }: GenerationSaveInput) {
+    if (!supabase || !userId) {
+      return;
+    }
+
+    const generation: GenerationInsert = {
+      user_id: userId,
+      product_name: savedProductName,
+      platform: savedPlatform,
+      tone: savedTone,
+      caption: generatedContent.caption,
+      hashtags: generatedContent.hashtags,
+      cta: generatedContent.cta,
+      description: generatedContent.description,
+    };
+
+    setHistoryErrorMessage(null);
+
+    const { error } = await supabase.from("generations").insert(generation);
+
+    if (error) {
+      console.error("Supabase generations insert error", error.message);
+      setHistoryErrorMessage(
+        "Nội dung đã tạo xong nhưng chưa lưu được vào lịch sử.",
+      );
+      return;
+    }
+
+    await fetchRecentGenerations();
+  }
 
   async function handleGenerate(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -124,10 +251,18 @@ function GeneratorDemoSection() {
     setProductNameError(null);
 
     try {
+      const submittedProductName = productName.trim();
+      const submittedPlatform = platform;
+      const submittedTone = tone;
+
       const response = await fetch("/api/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ productName, platform, tone }),
+        body: JSON.stringify({
+          productName: submittedProductName,
+          platform: submittedPlatform,
+          tone: submittedTone,
+        }),
       });
       const data = (await response.json()) as GenerateResponse;
 
@@ -140,6 +275,12 @@ function GeneratorDemoSection() {
       }
 
       setContent(data);
+      void saveGeneratedContent({
+        productName: submittedProductName,
+        platform: submittedPlatform,
+        tone: submittedTone,
+        content: data,
+      });
     } catch (error) {
       setErrorMessage(
         error instanceof Error
@@ -360,8 +501,117 @@ function GeneratorDemoSection() {
             </div>
           </div>
         </div>
+
+        <RecentHistorySection
+          generations={recentGenerations}
+          isLoading={isHistoryLoading}
+          errorMessage={historyErrorMessage}
+          isLoggedIn={Boolean(userId)}
+        />
       </div>
     </section>
+  );
+}
+
+function RecentHistorySection({
+  generations,
+  isLoading,
+  errorMessage,
+  isLoggedIn,
+}: {
+  generations: RecentGeneration[];
+  isLoading: boolean;
+  errorMessage: string | null;
+  isLoggedIn: boolean;
+}) {
+  return (
+    <section className="relative mt-6 overflow-hidden rounded-lg border border-white/10 bg-black/55 p-6 shadow-[0_24px_80px_rgba(0,0,0,0.38)] md:p-7">
+      <div className="pointer-events-none absolute inset-x-8 top-0 h-px bg-gradient-to-r from-transparent via-yellow-200/70 to-transparent" />
+      <div className="relative flex flex-col gap-2 border-b border-white/10 pb-5 sm:flex-row sm:items-end sm:justify-between">
+        <PanelTitle
+          title="Lịch sử gần đây"
+          description={
+            isLoggedIn
+              ? "5 nội dung mới nhất đã lưu"
+              : "Đăng nhập để tự động lưu nội dung đã tạo"
+          }
+        />
+        {isLoggedIn ? (
+          <StatusPill className="border-yellow-300/25 bg-yellow-300/10 text-yellow-100">
+            Latest 5
+          </StatusPill>
+        ) : null}
+      </div>
+
+      {!isLoggedIn ? (
+        <p className="relative mt-5 rounded-lg border border-dashed border-yellow-300/25 bg-yellow-300/[0.04] p-5 text-sm font-semibold leading-6 text-zinc-300">
+          Bạn vẫn có thể tạo content miễn phí. Khi đăng nhập, kết quả thành công
+          sẽ được lưu vào lịch sử.
+        </p>
+      ) : errorMessage ? (
+        <p
+          role="alert"
+          className="relative mt-5 rounded-lg border border-red-400/30 bg-red-500/[0.08] p-5 text-sm font-bold leading-6 text-red-200"
+        >
+          {errorMessage}
+        </p>
+      ) : isLoading ? (
+        <div className="relative mt-5 grid gap-3">
+          {[1, 2, 3].map((item) => (
+            <div
+              key={item}
+              className="rounded-lg border border-white/10 bg-white/[0.04] p-4"
+            >
+              <div className="h-3 w-40 animate-pulse rounded-full bg-yellow-300/25" />
+              <div className="mt-4 h-3 w-full animate-pulse rounded-full bg-white/10" />
+            </div>
+          ))}
+        </div>
+      ) : generations.length > 0 ? (
+        <div className="relative mt-5 grid gap-3">
+          {generations.map((generation) => (
+            <RecentGenerationItem
+              key={generation.id}
+              generation={generation}
+            />
+          ))}
+        </div>
+      ) : (
+        <p className="relative mt-5 rounded-lg border border-dashed border-white/10 bg-white/[0.04] p-5 text-sm font-semibold leading-6 text-zinc-400">
+          Chưa có nội dung nào được lưu.
+        </p>
+      )}
+    </section>
+  );
+}
+
+function RecentGenerationItem({
+  generation,
+}: {
+  generation: RecentGeneration;
+}) {
+  return (
+    <article className="rounded-lg border border-white/10 bg-white/[0.045] p-4 transition duration-300 hover:border-yellow-300/35 hover:bg-white/[0.065]">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <p className="text-sm font-black text-white">
+            {generation.product_name}
+          </p>
+          <p className="mt-1 text-xs font-semibold text-zinc-500">
+            {generation.platform} • {generation.tone}
+          </p>
+        </div>
+        <span className="shrink-0 rounded-lg border border-yellow-300/20 bg-yellow-300/10 px-3 py-1 text-xs font-black text-yellow-100">
+          {formatGenerationTime(generation.created_at)}
+        </span>
+      </div>
+      <p className="mt-3 line-clamp-2 text-sm font-semibold leading-6 text-zinc-300">
+        {generation.caption}
+      </p>
+      <p className="mt-3 line-clamp-1 text-xs font-bold leading-5 text-yellow-200/90">
+        {generation.hashtags.join(" ")}
+      </p>
+    </article>
   );
 }
 
@@ -506,6 +756,25 @@ function getGenerateErrorMessage(data: GenerateResponse) {
     : "Không thể tạo nội dung. Vui lòng thử lại.";
 }
 
+function formatGenerationTime(value: string | null) {
+  if (!value) {
+    return "Mới lưu";
+  }
+
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return "Mới lưu";
+  }
+
+  return new Intl.DateTimeFormat("vi-VN", {
+    day: "2-digit",
+    month: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
+}
+
 function getProductNameError(productName: string) {
   const trimmedProductName = productName.trim();
 
@@ -543,6 +812,144 @@ function isGeneratedContent(value: GenerateResponse): value is GeneratedContent 
 }
 
 export default function Home() {
+  const supabase = useMemo(
+    () => (isSupabaseConfigured ? createSupabaseClient() : null),
+    [],
+  );
+  const [userId, setUserId] = useState<string | null>(null);
+  const [userEmail, setUserEmail] = useState<string | null>(null);
+  const [isAuthReady, setIsAuthReady] = useState(!isSupabaseConfigured);
+  const [isAuthOpen, setIsAuthOpen] = useState(false);
+  const [authMode, setAuthMode] = useState<AuthMode>("login");
+  const [authEmail, setAuthEmail] = useState("");
+  const [authPassword, setAuthPassword] = useState("");
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [authMessage, setAuthMessage] = useState<string | null>(null);
+  const [isAuthLoading, setIsAuthLoading] = useState(false);
+
+  useEffect(() => {
+    if (!supabase) {
+      return;
+    }
+
+    let isMounted = true;
+
+    supabase.auth.getSession().then(({ data }) => {
+      if (!isMounted) {
+        return;
+      }
+
+      setUserEmail(data.session?.user.email ?? null);
+      setUserId(data.session?.user.id ?? null);
+      setIsAuthReady(true);
+    });
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      setUserEmail(session?.user.email ?? null);
+      setUserId(session?.user.id ?? null);
+      setIsAuthReady(true);
+    });
+
+    return () => {
+      isMounted = false;
+      subscription.unsubscribe();
+    };
+  }, [supabase]);
+
+  function openAuthDialog(nextMode: AuthMode) {
+    setAuthMode(nextMode);
+    setAuthError(null);
+    setAuthMessage(null);
+    setIsAuthOpen(true);
+  }
+
+  function switchAuthMode(nextMode: AuthMode) {
+    setAuthMode(nextMode);
+    setAuthError(null);
+    setAuthMessage(null);
+  }
+
+  async function handleAuthSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    if (!supabase) {
+      setAuthError("Supabase chưa được cấu hình cho môi trường này.");
+      return;
+    }
+
+    const email = authEmail.trim();
+
+    if (!email) {
+      setAuthError("Vui lòng nhập email.");
+      return;
+    }
+
+    if (authPassword.length < 6) {
+      setAuthError("Mật khẩu cần ít nhất 6 ký tự.");
+      return;
+    }
+
+    setIsAuthLoading(true);
+    setAuthError(null);
+    setAuthMessage(null);
+
+    const redirectTo =
+      typeof window === "undefined" ? undefined : window.location.origin;
+
+    const { data, error } =
+      authMode === "signup"
+        ? await supabase.auth.signUp({
+            email,
+            password: authPassword,
+            options: { emailRedirectTo: redirectTo },
+          })
+        : await supabase.auth.signInWithPassword({
+            email,
+            password: authPassword,
+          });
+
+    setIsAuthLoading(false);
+
+    if (error) {
+      setAuthError(getAuthErrorMessage(error.message));
+      return;
+    }
+
+    setAuthPassword("");
+
+    if (authMode === "signup" && !data.session) {
+      setAuthMessage("Tài khoản đã được tạo. Vui lòng kiểm tra email xác nhận.");
+      return;
+    }
+
+    setUserEmail(data.user?.email ?? email);
+    setUserId(data.user?.id ?? null);
+    setIsAuthOpen(false);
+  }
+
+  async function handleLogout() {
+    if (!supabase) {
+      return;
+    }
+
+    setIsAuthLoading(true);
+
+    const { error } = await supabase.auth.signOut();
+
+    setIsAuthLoading(false);
+
+    if (error) {
+      setAuthError(getAuthErrorMessage(error.message));
+      setIsAuthOpen(true);
+      return;
+    }
+
+    setUserEmail(null);
+    setUserId(null);
+  }
+
   return (
     <main className="min-h-screen bg-[#080808] text-white">
       <header className="border-b border-white/10 bg-black/80 backdrop-blur">
@@ -550,15 +957,41 @@ export default function Home() {
           <a href="#" className="text-lg font-black tracking-tight">
             AI<span className="text-yellow-300">Content</span>Seller
           </a>
-          <nav className="hidden items-center gap-8 text-sm font-semibold text-zinc-300 md:flex">
-            {navLinks.map((link) => (
-              <NavLink key={link.href} href={link.href}>
-                {link.label}
-              </NavLink>
-            ))}
-          </nav>
+          <div className="flex items-center gap-4">
+            <nav className="hidden items-center gap-8 text-sm font-semibold text-zinc-300 md:flex">
+              {navLinks.map((link) => (
+                <NavLink key={link.href} href={link.href}>
+                  {link.label}
+                </NavLink>
+              ))}
+            </nav>
+            <AuthNavbarState
+              isReady={isAuthReady}
+              userEmail={userEmail}
+              isLoading={isAuthLoading}
+              onLogin={() => openAuthDialog("login")}
+              onLogout={handleLogout}
+            />
+          </div>
         </div>
       </header>
+
+      {isAuthOpen ? (
+        <AuthDialog
+          mode={authMode}
+          email={authEmail}
+          password={authPassword}
+          error={authError}
+          message={authMessage}
+          isLoading={isAuthLoading}
+          isConfigured={isSupabaseConfigured}
+          onClose={() => setIsAuthOpen(false)}
+          onEmailChange={setAuthEmail}
+          onPasswordChange={setAuthPassword}
+          onModeChange={switchAuthMode}
+          onSubmit={handleAuthSubmit}
+        />
+      ) : null}
 
       <section className="relative overflow-hidden">
         <div className="absolute inset-x-0 top-0 h-72 bg-[radial-gradient(circle_at_top,#facc15_0%,rgba(250,204,21,0.24)_30%,transparent_62%)]" />
@@ -649,7 +1082,7 @@ export default function Home() {
         </div>
       </section>
 
-      <GeneratorDemoSection />
+      <GeneratorDemoSection supabase={supabase} userId={userId} />
 
       <section id="features" className="bg-yellow-300 text-black">
         <div className="mx-auto max-w-7xl px-6 py-16 md:py-20">
@@ -694,6 +1127,190 @@ export default function Home() {
   );
 }
 
+function AuthNavbarState({
+  isReady,
+  userEmail,
+  isLoading,
+  onLogin,
+  onLogout,
+}: {
+  isReady: boolean;
+  userEmail: string | null;
+  isLoading: boolean;
+  onLogin: () => void;
+  onLogout: () => void;
+}) {
+  if (userEmail) {
+    return (
+      <div className="flex items-center gap-3">
+        <span className="hidden max-w-48 truncate text-sm font-semibold text-zinc-300 sm:inline">
+          {userEmail}
+        </span>
+        <button
+          type="button"
+          onClick={onLogout}
+          disabled={isLoading}
+          className="inline-flex h-10 items-center justify-center rounded-full border border-yellow-300/40 bg-yellow-300/10 px-4 text-sm font-black text-yellow-200 transition hover:border-yellow-300 hover:bg-yellow-300 hover:text-black focus:outline-none focus:ring-2 focus:ring-yellow-300/60 disabled:cursor-not-allowed disabled:opacity-70"
+        >
+          Đăng xuất
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={onLogin}
+      disabled={!isReady}
+      className="inline-flex h-10 items-center justify-center rounded-full bg-yellow-300 px-4 text-sm font-black text-black shadow-[0_12px_32px_rgba(250,204,21,0.2)] transition hover:bg-yellow-200 focus:outline-none focus:ring-2 focus:ring-yellow-300/60 focus:ring-offset-2 focus:ring-offset-black disabled:cursor-not-allowed disabled:opacity-70"
+    >
+      Đăng nhập
+    </button>
+  );
+}
+
+function AuthDialog({
+  mode,
+  email,
+  password,
+  error,
+  message,
+  isLoading,
+  isConfigured,
+  onClose,
+  onEmailChange,
+  onPasswordChange,
+  onModeChange,
+  onSubmit,
+}: {
+  mode: AuthMode;
+  email: string;
+  password: string;
+  error: string | null;
+  message: string | null;
+  isLoading: boolean;
+  isConfigured: boolean;
+  onClose: () => void;
+  onEmailChange: (email: string) => void;
+  onPasswordChange: (password: string) => void;
+  onModeChange: (mode: AuthMode) => void;
+  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+}) {
+  const isSignup = mode === "signup";
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 px-6 py-8 backdrop-blur-md"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="auth-dialog-title"
+    >
+      <div className="relative w-full max-w-md overflow-hidden rounded-lg border border-yellow-300/20 bg-[linear-gradient(145deg,rgba(18,18,18,0.98),rgba(4,4,4,0.98))] p-6 shadow-[0_30px_110px_rgba(250,204,21,0.16)]">
+        <div className="pointer-events-none absolute -right-24 -top-24 h-56 w-56 rounded-full bg-yellow-300/12 blur-3xl" />
+        <div className="pointer-events-none absolute inset-x-8 top-0 h-px bg-gradient-to-r from-transparent via-yellow-200 to-transparent" />
+
+        <div className="relative flex items-start justify-between gap-4 border-b border-white/10 pb-5">
+          <div>
+            <p className="text-sm font-black text-yellow-200">Supabase Auth</p>
+            <h2
+              id="auth-dialog-title"
+              className="mt-2 text-2xl font-black text-white"
+            >
+              {isSignup ? "Tạo tài khoản" : "Đăng nhập"}
+            </h2>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="inline-flex h-10 w-10 items-center justify-center rounded-lg border border-white/10 bg-white/[0.04] text-lg font-black text-zinc-300 transition hover:border-yellow-300/50 hover:text-yellow-200 focus:outline-none focus:ring-2 focus:ring-yellow-300/60"
+            aria-label="Đóng form đăng nhập"
+          >
+            ×
+          </button>
+        </div>
+
+        <form onSubmit={onSubmit} className="relative mt-6 space-y-5">
+          {!isConfigured ? (
+            <div
+              role="alert"
+              className="rounded-lg border border-yellow-300/25 bg-yellow-300/10 p-4 text-sm font-semibold leading-6 text-yellow-100"
+            >
+              Thêm NEXT_PUBLIC_SUPABASE_URL và
+              NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY để bật đăng nhập.
+            </div>
+          ) : null}
+
+          <label className="block">
+            <span className={fieldLabelClassName}>Email</span>
+            <input
+              type="email"
+              value={email}
+              onChange={(event) => onEmailChange(event.target.value)}
+              placeholder="seller@example.com"
+              autoComplete="email"
+              className={`${formControlClassName} placeholder:text-zinc-600`}
+              required
+            />
+          </label>
+
+          <label className="block">
+            <span className={fieldLabelClassName}>Mật khẩu</span>
+            <input
+              type="password"
+              value={password}
+              onChange={(event) => onPasswordChange(event.target.value)}
+              placeholder="Ít nhất 6 ký tự"
+              autoComplete={isSignup ? "new-password" : "current-password"}
+              className={`${formControlClassName} placeholder:text-zinc-600`}
+              minLength={6}
+              required
+            />
+          </label>
+
+          {error ? (
+            <p
+              role="alert"
+              className="rounded-lg border border-red-400/30 bg-red-500/[0.08] p-4 text-sm font-bold leading-6 text-red-200"
+            >
+              {error}
+            </p>
+          ) : null}
+
+          {message ? (
+            <p className="rounded-lg border border-yellow-300/25 bg-yellow-300/10 p-4 text-sm font-bold leading-6 text-yellow-100">
+              {message}
+            </p>
+          ) : null}
+
+          <button
+            type="submit"
+            disabled={isLoading || !isConfigured}
+            className="inline-flex h-14 w-full items-center justify-center rounded-lg bg-[linear-gradient(135deg,#fde68a_0%,#facc15_42%,#d97706_100%)] px-6 text-sm font-black text-black shadow-[0_20px_55px_rgba(250,204,21,0.24)] transition hover:-translate-y-0.5 hover:shadow-[0_26px_80px_rgba(250,204,21,0.34)] focus:outline-none focus:ring-2 focus:ring-yellow-300/70 focus:ring-offset-2 focus:ring-offset-black disabled:cursor-not-allowed disabled:opacity-70 disabled:hover:translate-y-0"
+          >
+            {isLoading
+              ? "Đang xử lý..."
+              : isSignup
+                ? "Đăng ký"
+                : "Đăng nhập"}
+          </button>
+        </form>
+
+        <div className="relative mt-5 flex items-center justify-center gap-2 text-sm font-semibold text-zinc-400">
+          <span>{isSignup ? "Đã có tài khoản?" : "Chưa có tài khoản?"}</span>
+          <button
+            type="button"
+            onClick={() => onModeChange(isSignup ? "login" : "signup")}
+            className="font-black text-yellow-300 transition hover:text-yellow-100 focus:outline-none focus:ring-2 focus:ring-yellow-300/60"
+          >
+            {isSignup ? "Đăng nhập" : "Đăng ký"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function NavLink({
   href,
   children,
@@ -706,6 +1323,18 @@ function NavLink({
       {children}
     </a>
   );
+}
+
+function getAuthErrorMessage(message: string) {
+  if (message.toLowerCase().includes("invalid login credentials")) {
+    return "Email hoặc mật khẩu chưa đúng.";
+  }
+
+  if (message.toLowerCase().includes("email not confirmed")) {
+    return "Email chưa được xác nhận. Vui lòng kiểm tra hộp thư.";
+  }
+
+  return message || "Không thể xử lý đăng nhập. Vui lòng thử lại.";
 }
 
 function PreviewContentCard({ item }: { item: (typeof previewItems)[number] }) {
