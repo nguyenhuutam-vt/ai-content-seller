@@ -52,6 +52,10 @@ type RateLimitEntry = {
   resetAt: number;
 };
 
+type RateLimitCheckResult =
+  | { allowed: true }
+  | { allowed: false; retryAfterSeconds: number };
+
 type RateLimitResult =
   | { allowed: true; cookie?: string }
   | { allowed: false; retryAfterSeconds: number; cookie?: string };
@@ -275,15 +279,34 @@ async function checkRateLimit(request: Request): Promise<RateLimitResult> {
   const redisResult = await checkRedisRateLimit(rateLimitIdentity.key);
 
   if (redisResult) {
-    return { ...redisResult, cookie: rateLimitIdentity.cookie };
+    return withRateLimitCookie(redisResult, rateLimitIdentity.cookie);
   }
 
   const memoryResult = checkMemoryRateLimit(rateLimitIdentity.key);
 
-  return { ...memoryResult, cookie: rateLimitIdentity.cookie };
+  return withRateLimitCookie(memoryResult, rateLimitIdentity.cookie);
 }
 
-function checkMemoryRateLimit(key: string): Omit<RateLimitResult, "cookie"> {
+function withRateLimitCookie(
+  result: RateLimitCheckResult,
+  cookie: string | undefined,
+): RateLimitResult {
+  if (!cookie) {
+    return result;
+  }
+
+  if (result.allowed) {
+    return { allowed: true, cookie };
+  }
+
+  return {
+    allowed: false,
+    retryAfterSeconds: result.retryAfterSeconds,
+    cookie,
+  };
+}
+
+function checkMemoryRateLimit(key: string): RateLimitCheckResult {
   const now = Date.now();
   const currentEntry = rateLimitStore.get(key);
 
@@ -311,7 +334,7 @@ function checkMemoryRateLimit(key: string): Omit<RateLimitResult, "cookie"> {
 
 async function checkRedisRateLimit(
   key: string,
-): Promise<Omit<RateLimitResult, "cookie"> | null> {
+): Promise<RateLimitCheckResult | null> {
   const redisUrl = process.env.RATE_LIMIT_REDIS_REST_URL;
   const redisToken = process.env.RATE_LIMIT_REDIS_REST_TOKEN;
 
