@@ -1,5 +1,27 @@
 This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
+## GitHub AI Code Review
+
+Repo này có workflow `.github/workflows/ai-code-review.yml` để review code tự động trên GitHub.
+
+Để bật AI review:
+
+1. Vào GitHub repo > Settings > Secrets and variables > Actions.
+2. Tạo repository secret tên `OPENAI_API_KEY`.
+3. Push code lên branch và mở Pull Request vào `main`.
+
+Không commit API key trực tiếp vào repo.
+
+Khi có Pull Request mới hoặc có commit mới được push vào Pull Request, workflow sẽ:
+
+- chạy `npm ci`, `npm run lint`, và `npm run build`;
+- chạy Codex ở chế độ `read-only`;
+- comment kết quả review vào Pull Request bằng tiếng Việt.
+
+Workflow cũng chạy lint/build trên mọi push. AI review chỉ comment trên Pull Request vì GitHub gắn review/comment vào Pull Request, không gắn trực tiếp vào push thường.
+
+Mặc định workflow dùng `gpt-5.4-mini` với `effort: low` để giữ chi phí thấp. Có thể đổi `effort` sang `medium` trong workflow nếu cần review sâu hơn.
+
 ## Getting Started
 
 First, run the development server:
