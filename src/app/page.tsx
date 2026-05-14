@@ -205,11 +205,58 @@ function GeneratorDemoSection({
     }
 
     setRecentGenerations(data ?? []);
-  }, [supabase, userId, isMountedRef]);
+  }, [supabase, userId]);
 
   useEffect(() => {
-    void fetchRecentGenerations();
-  }, [fetchRecentGenerations]);
+    let cancelled = false;
+
+    async function loadRecentGenerations() {
+      if (!supabase || !userId) {
+        if (!cancelled) {
+          setRecentGenerations([]);
+          setHistoryErrorMessage(null);
+          setIsHistoryLoading(false);
+        }
+        return;
+      }
+
+      if (!cancelled) {
+        setIsHistoryLoading(true);
+        setHistoryErrorMessage(null);
+      }
+
+      const { data, error } = await supabase
+        .from("generations")
+        .select(
+          "id, product_name, platform, tone, caption, hashtags, cta, description, created_at",
+        )
+        .eq("user_id", userId)
+        .order("created_at", { ascending: false })
+        .limit(RECENT_GENERATION_LIMIT)
+        .returns<RecentGeneration[]>();
+
+      if (cancelled) {
+        return;
+      }
+
+      setIsHistoryLoading(false);
+
+      if (error) {
+        console.error("Supabase generations select error", error.message);
+        setRecentGenerations([]);
+        setHistoryErrorMessage("Không tải được lịch sử gần đây.");
+        return;
+      }
+
+      setRecentGenerations(data ?? []);
+    }
+
+    void loadRecentGenerations();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [supabase, userId]);
 
   async function saveGeneratedContent({
     productName: savedProductName,
