@@ -44,6 +44,13 @@ const stats = ["Caption", "Hashtag", "Mô tả", "CTA"];
 const platforms = ["Shopee", "TikTok Shop", "Facebook"] as const;
 const tones = ["Chuyên nghiệp", "Gen Z", "Sang trọng", "Viral"] as const;
 
+const generatorSteps = [
+  "Nhập sản phẩm",
+  "Chọn kênh",
+  "Chọn tone",
+  "Tạo bản nháp",
+] as const;
+
 type Platform = (typeof platforms)[number];
 type Tone = (typeof tones)[number];
 
@@ -54,45 +61,7 @@ type GeneratedContent = {
   description: string;
 };
 
-function createFakeContent(
-  productName: string,
-  platform: Platform,
-  tone: Tone,
-): GeneratedContent {
-  const product = productName.trim() || "Set dưỡng da phục hồi ban đêm";
-  const platformHook =
-    platform === "TikTok Shop"
-      ? "Lên TikTok Shop là phải có một món vừa đẹp hình vừa chốt đơn nhanh."
-      : platform === "Facebook"
-        ? "Một bài đăng tốt cần nói đúng điều khách đang cần trước khi họ lướt qua."
-        : "Shopee hôm nay có một lựa chọn đáng thêm ngay vào giỏ.";
-
-  const toneLine =
-    tone === "Gen Z"
-      ? "Nhỏ gọn, xịn vibe, dùng một lần là hiểu vì sao đang được săn."
-      : tone === "Sang trọng"
-        ? "Thiết kế tinh tế, cảm giác cao cấp và phù hợp để nâng tầm thói quen mỗi ngày."
-        : tone === "Viral"
-          ? "Món này đang có đủ yếu tố để khách dừng lại, xem tiếp và bấm mua."
-          : "Tập trung vào công năng, độ bền và trải nghiệm sử dụng thực tế.";
-
-  return {
-    caption: `${platformHook} ${product} giúp bạn giải quyết nhu cầu hằng ngày với diện mạo chỉn chu, dễ dùng và cực kỳ hợp để làm nổi bật gian hàng. ${toneLine}`,
-    hashtags:
-      platform === "Facebook"
-        ? "#contentbanhang #shoponline #sanphamhot #muasamthongminh"
-        : platform === "TikTok Shop"
-          ? "#tiktokshop #dealhot #xuhuongmuasam #reviewthat"
-          : "#shopee #shopeefinds #dealhomnay #sanphamnenmua",
-    cta:
-      tone === "Viral"
-        ? "Bấm đặt ngay trước khi hết lượt ưu đãi hôm nay."
-        : tone === "Gen Z"
-          ? "Chốt đơn liền tay để kịp lên outfit/giỏ đồ mới nhé."
-          : "Đặt hàng hôm nay để nhận ưu đãi và tư vấn chọn mẫu phù hợp.",
-    description: `${product} được gợi ý cho khách hàng muốn một sản phẩm đẹp, dễ sử dụng và có giá trị rõ ràng. Nội dung có thể dùng cho ${platform}, nhấn mạnh lợi ích chính, cảm giác sở hữu và lý do nên mua ngay trong lần xem đầu tiên.`,
-  };
-}
+type GenerateResponse = GeneratedContent | { error?: string };
 
 function GeneratorDemoSection() {
   const [productName, setProductName] = useState(
@@ -102,94 +71,132 @@ function GeneratorDemoSection() {
   const [tone, setTone] = useState<Tone>("Chuyên nghiệp");
   const [isLoading, setIsLoading] = useState(false);
   const [content, setContent] = useState<GeneratedContent | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  function handleGenerate(event: FormEvent<HTMLFormElement>) {
+  async function handleGenerate(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+
+    if (isLoading) {
+      return;
+    }
+
     setIsLoading(true);
     setContent(null);
+    setErrorMessage(null);
 
-    window.setTimeout(() => {
-      setContent(createFakeContent(productName, platform, tone));
+    try {
+      const response = await fetch("/api/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ productName, platform, tone }),
+      });
+      const data = (await response.json()) as GenerateResponse;
+
+      if (!response.ok) {
+        throw new Error(getGenerateErrorMessage(data));
+      }
+
+      if (!isGeneratedContent(data)) {
+        throw new Error("API trả về định dạng không hợp lệ.");
+      }
+
+      setContent(data);
+    } catch (error) {
+      setErrorMessage(
+        error instanceof Error
+          ? error.message
+          : "Không thể tạo nội dung. Vui lòng thử lại.",
+      );
+    } finally {
       setIsLoading(false);
-    }, 1500);
+    }
   }
 
   return (
     <section
       id="generator"
-      className="relative overflow-hidden border-y border-white/10 bg-[#0b0b0b]"
+      className="relative isolate overflow-hidden border-y border-yellow-300/10 bg-[#050505]"
     >
-      <div className="absolute left-1/2 top-0 h-72 w-[42rem] -translate-x-1/2 rounded-full bg-yellow-300/10 blur-3xl" />
-      <div className="absolute bottom-0 right-0 h-80 w-80 rounded-full bg-amber-500/10 blur-3xl" />
+      <div className="absolute inset-0 -z-10 bg-[radial-gradient(circle_at_50%_0%,rgba(250,204,21,0.22),transparent_32%),radial-gradient(circle_at_86%_72%,rgba(245,158,11,0.16),transparent_28%),linear-gradient(180deg,#070707_0%,#020202_100%)]" />
+      <div className="absolute inset-0 -z-10 opacity-[0.18] [background-image:linear-gradient(rgba(250,204,21,0.24)_1px,transparent_1px),linear-gradient(90deg,rgba(250,204,21,0.18)_1px,transparent_1px)] [background-size:72px_72px] [mask-image:radial-gradient(circle_at_50%_20%,black,transparent_72%)]" />
+      <div className="absolute left-1/2 top-0 -z-10 h-px w-[78rem] -translate-x-1/2 bg-gradient-to-r from-transparent via-yellow-200/70 to-transparent" />
 
-      <div className="relative mx-auto max-w-7xl px-6 py-16 md:py-24">
-        <div className="grid gap-10 lg:grid-cols-[0.85fr_1.15fr] lg:items-end">
+      <div className="relative mx-auto max-w-7xl px-6 py-20 md:py-28">
+        <div className="grid gap-12 lg:grid-cols-[0.84fr_1.16fr] lg:items-end">
           <div>
-            <p className="inline-flex rounded-full border border-yellow-300/30 bg-yellow-300/10 px-4 py-2 text-xs font-black uppercase tracking-[0.18em] text-yellow-200 shadow-[0_0_34px_rgba(250,204,21,0.16)]">
+            <p className="inline-flex rounded-lg border border-yellow-300/25 bg-yellow-300/10 px-3 py-2 text-xs font-extrabold uppercase text-yellow-100 shadow-[0_0_36px_rgba(250,204,21,0.16)]">
               AI Generator Demo
             </p>
-            <h2 className="mt-5 max-w-2xl text-4xl font-black tracking-tight text-white md:text-5xl">
+            <h2 className="mt-6 max-w-2xl text-4xl font-black leading-[1.05] text-white md:text-6xl">
               Tạo content bán hàng trong vài giây.
             </h2>
-            <p className="mt-5 max-w-xl text-base leading-7 text-zinc-400">
-              Nhập tên sản phẩm, chọn kênh bán và giọng điệu. Demo này mô phỏng
-              cách AI sẽ tạo caption, hashtag, CTA và mô tả sản phẩm cho seller
-              Việt Nam.
+            <p className="mt-6 max-w-xl text-base leading-8 text-zinc-400 md:text-lg">
+              Nhập tên sản phẩm, chọn kênh bán và giọng điệu. Công cụ sẽ tạo
+              caption, hashtag, CTA và mô tả sản phẩm cho seller Việt Nam qua
+              API route server-side.
             </p>
           </div>
 
-          <div className="grid grid-cols-2 gap-3 rounded-3xl border border-yellow-300/20 bg-white/[0.03] p-3 shadow-[0_0_70px_rgba(250,204,21,0.12)] sm:grid-cols-4">
-            {[
-              "1. Nhập sản phẩm",
-              "2. Chọn kênh",
-              "3. Chọn tone",
-              "4. Tạo bản nháp",
-            ].map((step) => (
-              <div
-                key={step}
-                className="rounded-2xl border border-white/10 bg-black/60 px-4 py-4 text-center text-xs font-black text-zinc-300 transition hover:border-yellow-300/60 hover:text-yellow-200"
-              >
-                {step}
-              </div>
-            ))}
+          <div className="relative rounded-lg border border-yellow-300/15 bg-black/55 p-2 shadow-[0_28px_90px_rgba(250,204,21,0.13)] backdrop-blur-xl">
+            <div className="absolute inset-x-8 top-0 h-px bg-gradient-to-r from-transparent via-yellow-200 to-transparent" />
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+              {generatorSteps.map((step, index) => (
+                <div
+                  key={step}
+                  className="group rounded-lg border border-white/10 bg-white/[0.035] px-4 py-4 transition duration-500 ease-out hover:-translate-y-0.5 hover:border-yellow-300/45 hover:bg-yellow-300/[0.08] hover:shadow-[0_18px_50px_rgba(250,204,21,0.16)]"
+                >
+                  <span className="text-xs font-black text-yellow-300/80">
+                    0{index + 1}
+                  </span>
+                  <p className="mt-2 text-sm font-bold text-zinc-200 transition duration-500 group-hover:text-yellow-100">
+                    {step}
+                  </p>
+                </div>
+              ))}
+            </div>
           </div>
         </div>
 
-        <div className="mt-10 grid gap-6 lg:grid-cols-[0.95fr_1.05fr]">
+        <div className="mt-12 grid gap-6 lg:grid-cols-[0.92fr_1.08fr]">
           <form
             onSubmit={handleGenerate}
-            className="rounded-[2rem] border border-white/10 bg-[#111]/95 p-5 shadow-2xl shadow-black/50 transition duration-300 hover:border-yellow-300/35 hover:shadow-yellow-300/10 md:p-7"
+            className="relative overflow-hidden rounded-lg border border-white/10 bg-[linear-gradient(145deg,rgba(22,22,22,0.96),rgba(5,5,5,0.96))] p-6 shadow-[0_30px_90px_rgba(0,0,0,0.55)] transition duration-500 ease-out hover:-translate-y-1 hover:border-yellow-300/35 hover:shadow-[0_36px_110px_rgba(250,204,21,0.12)] md:p-7"
           >
-            <div className="flex items-center justify-between gap-4 border-b border-white/10 pb-5">
+            <div className="pointer-events-none absolute -right-24 -top-24 h-56 w-56 rounded-full bg-yellow-300/10 blur-3xl" />
+            <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-yellow-200/70 to-transparent" />
+
+            <div className="relative flex items-center justify-between gap-4 border-b border-white/10 pb-5">
               <div>
-                <p className="text-sm font-black text-yellow-300">
+                <p className="text-sm font-black text-yellow-200">
                   Input brief
                 </p>
                 <p className="mt-1 text-xs font-semibold text-zinc-500">
-                  Không gọi API, chỉ mô phỏng kết quả AI
+                  Gọi OpenAI qua API route server-side
                 </p>
               </div>
-              <span className="rounded-full border border-yellow-300/30 bg-yellow-300/10 px-3 py-1 text-xs font-black text-yellow-200">
+              <span className="rounded-lg border border-yellow-300/25 bg-yellow-300/10 px-3 py-1 text-xs font-black text-yellow-100 shadow-[0_0_28px_rgba(250,204,21,0.14)]">
                 Live demo
               </span>
             </div>
 
-            <div className="mt-6 space-y-5">
+            <div className="relative mt-7 space-y-5">
               <label className="block">
-                <span className="text-xs font-black uppercase tracking-[0.16em] text-zinc-500">
+                <span className="text-xs font-black uppercase text-zinc-500">
                   Product name
                 </span>
                 <input
                   value={productName}
                   onChange={(event) => setProductName(event.target.value)}
                   placeholder="Ví dụ: Nến thơm thư giãn hương gỗ"
-                  className="mt-3 h-14 w-full rounded-2xl border border-white/10 bg-black px-5 text-sm font-bold text-white outline-none transition placeholder:text-zinc-600 hover:border-yellow-300/40 focus:border-yellow-300 focus:shadow-[0_0_0_4px_rgba(250,204,21,0.12)]"
+                  required
+                  maxLength={120}
+                  className="mt-3 h-14 w-full rounded-lg border border-white/10 bg-white/[0.045] px-5 text-sm font-semibold text-white outline-none transition duration-300 placeholder:text-zinc-600 hover:border-yellow-300/35 hover:bg-white/[0.06] focus:border-yellow-300 focus:bg-black/80 focus:shadow-[0_0_0_4px_rgba(250,204,21,0.12),0_18px_45px_rgba(250,204,21,0.08)]"
                 />
               </label>
 
               <div className="grid gap-5 sm:grid-cols-2">
                 <label className="block">
-                  <span className="text-xs font-black uppercase tracking-[0.16em] text-zinc-500">
+                  <span className="text-xs font-black uppercase text-zinc-500">
                     Platform
                   </span>
                   <select
@@ -197,7 +204,7 @@ function GeneratorDemoSection() {
                     onChange={(event) =>
                       setPlatform(event.target.value as Platform)
                     }
-                    className="mt-3 h-14 w-full rounded-2xl border border-white/10 bg-black px-5 text-sm font-bold text-white outline-none transition hover:border-yellow-300/40 focus:border-yellow-300 focus:shadow-[0_0_0_4px_rgba(250,204,21,0.12)]"
+                    className="mt-3 h-14 w-full rounded-lg border border-white/10 bg-white/[0.045] px-5 text-sm font-semibold text-white outline-none transition duration-300 hover:border-yellow-300/35 hover:bg-white/[0.06] focus:border-yellow-300 focus:bg-black/80 focus:shadow-[0_0_0_4px_rgba(250,204,21,0.12),0_18px_45px_rgba(250,204,21,0.08)]"
                   >
                     {platforms.map((item) => (
                       <option key={item}>{item}</option>
@@ -206,13 +213,13 @@ function GeneratorDemoSection() {
                 </label>
 
                 <label className="block">
-                  <span className="text-xs font-black uppercase tracking-[0.16em] text-zinc-500">
+                  <span className="text-xs font-black uppercase text-zinc-500">
                     Tone
                   </span>
                   <select
                     value={tone}
                     onChange={(event) => setTone(event.target.value as Tone)}
-                    className="mt-3 h-14 w-full rounded-2xl border border-white/10 bg-black px-5 text-sm font-bold text-white outline-none transition hover:border-yellow-300/40 focus:border-yellow-300 focus:shadow-[0_0_0_4px_rgba(250,204,21,0.12)]"
+                    className="mt-3 h-14 w-full rounded-lg border border-white/10 bg-white/[0.045] px-5 text-sm font-semibold text-white outline-none transition duration-300 hover:border-yellow-300/35 hover:bg-white/[0.06] focus:border-yellow-300 focus:bg-black/80 focus:shadow-[0_0_0_4px_rgba(250,204,21,0.12),0_18px_45px_rgba(250,204,21,0.08)]"
                   >
                     {tones.map((item) => (
                       <option key={item}>{item}</option>
@@ -224,62 +231,95 @@ function GeneratorDemoSection() {
               <button
                 type="submit"
                 disabled={isLoading}
-                className="group inline-flex h-14 w-full items-center justify-center rounded-2xl bg-yellow-300 px-6 text-sm font-black text-black shadow-[0_18px_50px_rgba(250,204,21,0.28)] transition duration-300 hover:-translate-y-1 hover:bg-yellow-200 hover:shadow-[0_24px_70px_rgba(250,204,21,0.38)] disabled:cursor-not-allowed disabled:opacity-70 disabled:hover:translate-y-0"
+                className="group relative inline-flex h-14 w-full items-center justify-center overflow-hidden rounded-lg bg-[linear-gradient(135deg,#fde68a_0%,#facc15_40%,#d97706_100%)] px-6 text-sm font-black text-black shadow-[0_20px_55px_rgba(250,204,21,0.24)] transition duration-500 ease-out hover:-translate-y-1 hover:shadow-[0_26px_80px_rgba(250,204,21,0.38)] disabled:cursor-not-allowed disabled:opacity-70 disabled:hover:translate-y-0"
               >
-                <span className="transition group-hover:scale-[1.03]">
+                <span className="absolute inset-y-0 -left-20 w-16 rotate-12 bg-white/35 blur-md transition duration-700 group-hover:left-[115%]" />
+                <span className="relative flex items-center gap-2 transition duration-500 group-hover:scale-[1.02]">
                   {isLoading ? "Đang tạo nội dung..." : "Tạo content"}
+                  <span aria-hidden="true">-&gt;</span>
                 </span>
               </button>
             </div>
           </form>
 
-          <div className="relative rounded-[2rem] border border-yellow-300/20 bg-[linear-gradient(145deg,#151515,#050505)] p-5 shadow-2xl shadow-yellow-300/10 transition duration-300 hover:border-yellow-300/45 md:p-7">
-            <div className="absolute inset-x-8 top-0 h-px bg-gradient-to-r from-transparent via-yellow-300 to-transparent" />
+          <div className="relative overflow-hidden rounded-lg border border-yellow-300/18 bg-[linear-gradient(145deg,rgba(18,18,18,0.96),rgba(4,4,4,0.98)_58%,rgba(28,19,5,0.92))] p-6 shadow-[0_30px_110px_rgba(250,204,21,0.12)] transition duration-500 ease-out hover:-translate-y-1 hover:border-yellow-300/45 hover:shadow-[0_36px_130px_rgba(250,204,21,0.18)] md:p-7">
+            <div className="pointer-events-none absolute -left-24 -top-24 h-72 w-72 rounded-full bg-yellow-300/12 blur-3xl" />
+            <div className="pointer-events-none absolute bottom-0 right-0 h-64 w-64 translate-x-1/3 translate-y-1/3 rounded-full bg-amber-500/12 blur-3xl" />
+            <div className="pointer-events-none absolute inset-x-8 top-0 h-px bg-gradient-to-r from-transparent via-yellow-200 to-transparent" />
 
-            <div className="flex items-center justify-between gap-4 border-b border-white/10 pb-5">
+            <div className="relative flex flex-col gap-4 border-b border-white/10 pb-5 sm:flex-row sm:items-center sm:justify-between">
               <div>
-                <p className="text-sm font-black text-yellow-300">AI output</p>
+                <p className="text-sm font-black text-yellow-200">AI output</p>
                 <p className="mt-1 text-xs font-semibold text-zinc-500">
                   Caption, hashtag, CTA và mô tả
                 </p>
               </div>
-              <span className="rounded-full bg-white px-3 py-1 text-xs font-black text-black">
-                {platform}
-              </span>
+              <div className="flex flex-wrap gap-2">
+                <span className="rounded-lg border border-white/10 bg-white px-3 py-1 text-xs font-black text-black shadow-[0_12px_34px_rgba(255,255,255,0.12)]">
+                  {platform}
+                </span>
+                <span className="rounded-lg border border-yellow-300/25 bg-yellow-300/10 px-3 py-1 text-xs font-black text-yellow-100">
+                  {tone}
+                </span>
+              </div>
             </div>
 
-            {isLoading ? (
-              <div className="mt-6 space-y-4">
-                {[1, 2, 3, 4].map((item) => (
-                  <div
-                    key={item}
-                    className="h-24 animate-pulse rounded-2xl border border-white/10 bg-white/[0.06]"
-                  />
-                ))}
-              </div>
-            ) : content ? (
-              <div className="mt-6 grid gap-4">
-                <OutputBlock title="Caption" body={content.caption} featured />
-                <div className="grid gap-4 sm:grid-cols-2">
-                  <OutputBlock title="Hashtags" body={content.hashtags} />
-                  <OutputBlock title="CTA" body={content.cta} />
+            <div aria-live="polite">
+              {errorMessage ? (
+                <div
+                  role="alert"
+                  className="relative mt-6 overflow-hidden rounded-lg border border-red-400/30 bg-red-500/[0.08] p-5 shadow-[inset_0_1px_0_rgba(248,113,113,0.18)]"
+                >
+                  <div className="absolute -right-16 -top-16 h-40 w-40 rounded-full bg-red-400/10 blur-3xl" />
+                  <p className="relative text-sm font-black text-red-200">
+                    Không tạo được nội dung
+                  </p>
+                  <p className="relative mt-2 text-sm leading-6 text-zinc-300">
+                    {errorMessage}
+                  </p>
                 </div>
-                <OutputBlock
-                  title="Product description"
-                  body={content.description}
-                />
-              </div>
-            ) : (
-              <div className="mt-6 rounded-3xl border border-dashed border-yellow-300/30 bg-yellow-300/[0.05] p-8 text-center">
-                <p className="text-xl font-black text-white">
-                  Sẵn sàng tạo bản nháp đầu tiên.
-                </p>
-                <p className="mt-3 text-sm leading-6 text-zinc-400">
-                  Kết quả mẫu sẽ xuất hiện ở đây sau 1.5 giây với nội dung tiếng
-                  Việt phù hợp kênh bán hàng đã chọn.
-                </p>
-              </div>
-            )}
+              ) : isLoading ? (
+                <div className="relative mt-6 space-y-4">
+                  {[1, 2, 3, 4].map((item) => (
+                    <div
+                      key={item}
+                      className="overflow-hidden rounded-lg border border-white/10 bg-white/[0.045] p-5"
+                    >
+                      <div className="h-3 w-24 animate-pulse rounded-full bg-yellow-300/30" />
+                      <div className="mt-5 h-3 w-full animate-pulse rounded-full bg-white/10" />
+                      <div className="mt-3 h-3 w-4/5 animate-pulse rounded-full bg-white/10" />
+                    </div>
+                  ))}
+                </div>
+              ) : content ? (
+                <div className="relative mt-6 grid gap-4">
+                  <OutputBlock
+                    title="Caption"
+                    body={content.caption}
+                    featured
+                  />
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <OutputBlock title="Hashtags" body={content.hashtags} />
+                    <OutputBlock title="CTA" body={content.cta} />
+                  </div>
+                  <OutputBlock
+                    title="Product description"
+                    body={content.description}
+                  />
+                </div>
+              ) : (
+                <div className="relative mt-6 overflow-hidden rounded-lg border border-dashed border-yellow-300/30 bg-yellow-300/[0.045] p-8 text-center shadow-[inset_0_1px_0_rgba(250,204,21,0.18)]">
+                  <div className="absolute left-1/2 top-0 h-24 w-64 -translate-x-1/2 rounded-full bg-yellow-300/10 blur-3xl" />
+                  <p className="relative text-xl font-black text-white">
+                    Sẵn sàng tạo bản nháp đầu tiên.
+                  </p>
+                  <p className="relative mt-3 text-sm leading-6 text-zinc-400">
+                    Kết quả AI sẽ xuất hiện ở đây với nội dung tiếng Việt phù
+                    hợp kênh bán hàng đã chọn.
+                  </p>
+                </div>
+              )}
+            </div>
           </div>
         </div>
       </div>
@@ -298,27 +338,81 @@ function OutputBlock({
 }) {
   return (
     <article
-      className={`rounded-2xl border p-5 transition duration-300 hover:-translate-y-1 ${
+      className={`group relative overflow-hidden rounded-lg border p-5 transition duration-500 ease-out hover:-translate-y-1 ${
         featured
-          ? "border-yellow-300/40 bg-yellow-300 text-black shadow-[0_0_48px_rgba(250,204,21,0.22)]"
-          : "border-white/10 bg-white/[0.06] hover:border-yellow-300/35"
+          ? "border-yellow-200/70 bg-[linear-gradient(135deg,#fde68a_0%,#facc15_46%,#d97706_100%)] text-black shadow-[0_26px_80px_rgba(250,204,21,0.26)] hover:shadow-[0_32px_95px_rgba(250,204,21,0.34)]"
+          : "border-white/10 bg-white/[0.055] shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] hover:border-yellow-300/35 hover:bg-white/[0.075] hover:shadow-[0_22px_70px_rgba(250,204,21,0.12)]"
       }`}
     >
-      <p
-        className={`text-xs font-black uppercase tracking-[0.16em] ${
-          featured ? "text-black/60" : "text-yellow-300"
+      <div
+        className={`pointer-events-none absolute inset-x-0 top-0 h-px ${
+          featured
+            ? "bg-black/20"
+            : "bg-gradient-to-r from-transparent via-yellow-200/60 to-transparent"
         }`}
-      >
-        {title}
-      </p>
+      />
+      {featured ? (
+        <div className="pointer-events-none absolute -right-20 -top-20 h-52 w-52 rounded-full bg-white/30 blur-3xl" />
+      ) : (
+        <div className="pointer-events-none absolute -right-16 -top-16 h-40 w-40 rounded-full bg-yellow-300/10 blur-3xl transition duration-500 group-hover:bg-yellow-300/16" />
+      )}
+
+      <div className="relative flex items-center justify-between gap-3">
+        <div className="flex items-center gap-3">
+          <span
+            className={`flex h-8 w-8 items-center justify-center rounded-lg text-xs font-black ${
+              featured
+                ? "bg-black text-yellow-300 shadow-[0_12px_30px_rgba(0,0,0,0.2)]"
+                : "border border-yellow-300/25 bg-yellow-300/10 text-yellow-200"
+            }`}
+          >
+            {title.slice(0, 1)}
+          </span>
+          <p
+            className={`text-xs font-black uppercase ${
+              featured ? "text-black/65" : "text-yellow-200"
+            }`}
+          >
+            {title}
+          </p>
+        </div>
+        <span
+          className={`rounded-lg px-2.5 py-1 text-[11px] font-black ${
+            featured
+              ? "bg-black/10 text-black/60"
+              : "border border-white/10 bg-black/35 text-zinc-400"
+          }`}
+        >
+          {featured ? "Hero" : "Ready"}
+        </span>
+      </div>
       <p
-        className={`mt-3 text-sm font-semibold leading-7 ${
+        className={`relative mt-4 text-sm font-semibold leading-7 ${
           featured ? "text-black" : "text-zinc-200"
         }`}
       >
         {body}
       </p>
     </article>
+  );
+}
+
+function getGenerateErrorMessage(data: GenerateResponse) {
+  return "error" in data && data.error
+    ? data.error
+    : "Không thể tạo nội dung. Vui lòng thử lại.";
+}
+
+function isGeneratedContent(value: GenerateResponse): value is GeneratedContent {
+  return (
+    "caption" in value &&
+    "hashtags" in value &&
+    "cta" in value &&
+    "description" in value &&
+    typeof value.caption === "string" &&
+    typeof value.hashtags === "string" &&
+    typeof value.cta === "string" &&
+    typeof value.description === "string"
   );
 }
 
