@@ -6,6 +6,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 
@@ -157,16 +158,28 @@ function GeneratorDemoSection({
     null,
   );
 
+  const isMountedRef = useRef(true);
+
+  useEffect(() => {
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
+
   const fetchRecentGenerations = useCallback(async () => {
     if (!supabase || !userId) {
-      setRecentGenerations([]);
-      setHistoryErrorMessage(null);
-      setIsHistoryLoading(false);
+      if (isMountedRef.current) {
+        setRecentGenerations([]);
+        setHistoryErrorMessage(null);
+        setIsHistoryLoading(false);
+      }
       return;
     }
 
-    setIsHistoryLoading(true);
-    setHistoryErrorMessage(null);
+    if (isMountedRef.current) {
+      setIsHistoryLoading(true);
+      setHistoryErrorMessage(null);
+    }
 
     const { data, error } = await supabase
       .from("generations")
@@ -178,6 +191,10 @@ function GeneratorDemoSection({
       .limit(RECENT_GENERATION_LIMIT)
       .returns<RecentGeneration[]>();
 
+    if (!isMountedRef.current) {
+      return;
+    }
+
     setIsHistoryLoading(false);
 
     if (error) {
@@ -188,7 +205,7 @@ function GeneratorDemoSection({
     }
 
     setRecentGenerations(data ?? []);
-  }, [supabase, userId]);
+  }, [supabase, userId, isMountedRef]);
 
   useEffect(() => {
     void fetchRecentGenerations();
@@ -338,10 +355,7 @@ function GeneratorDemoSection({
 
             <div className="relative flex items-center justify-between gap-4 border-b border-white/10 pb-5">
               <div>
-                <PanelTitle
-                  title="Input brief"
-                  description=""
-                />
+                <PanelTitle title="Input brief" description="" />
               </div>
               <StatusPill className="border-yellow-300/25 bg-yellow-300/10 text-yellow-100 shadow-[0_0_28px_rgba(250,204,21,0.14)]">
                 Live demo
@@ -374,8 +388,7 @@ function GeneratorDemoSection({
                 <p
                   id="product-name-help"
                   className="mt-2 text-xs font-medium leading-5 text-zinc-500"
-                >
-                </p>
+                ></p>
                 {productNameError ? (
                   <p
                     id="product-name-error"
@@ -571,10 +584,7 @@ function RecentHistorySection({
       ) : generations.length > 0 ? (
         <div className="relative mt-5 grid gap-3">
           {generations.map((generation) => (
-            <RecentGenerationItem
-              key={generation.id}
-              generation={generation}
-            />
+            <RecentGenerationItem key={generation.id} generation={generation} />
           ))}
         </div>
       ) : (
@@ -639,19 +649,15 @@ function StatusPill({
   className: string;
 }) {
   return (
-    <span className={`rounded-lg border px-3 py-1 text-xs font-black ${className}`}>
+    <span
+      className={`rounded-lg border px-3 py-1 text-xs font-black ${className}`}
+    >
       {children}
     </span>
   );
 }
 
-function GeneratorStepCard({
-  step,
-  index,
-}: {
-  step: string;
-  index: number;
-}) {
+function GeneratorStepCard({ step, index }: { step: string; index: number }) {
   return (
     <div className="group rounded-lg border border-white/10 bg-white/[0.035] px-4 py-4 transition duration-500 ease-out hover:-translate-y-0.5 hover:border-yellow-300/45 hover:bg-yellow-300/[0.08] hover:shadow-[0_18px_50px_rgba(250,204,21,0.16)]">
       <span className="text-xs font-black text-yellow-300/80">
@@ -794,7 +800,9 @@ function getProductNameError(productName: string) {
   return null;
 }
 
-function isGeneratedContent(value: GenerateResponse): value is GeneratedContent {
+function isGeneratedContent(
+  value: GenerateResponse,
+): value is GeneratedContent {
   return (
     "caption" in value &&
     "hashtags" in value &&
@@ -952,7 +960,9 @@ export default function Home() {
     setAuthPassword("");
 
     if (authMode === "signup" && !data.session) {
-      setAuthMessage("Tài khoản đã được tạo. Vui lòng kiểm tra email xác nhận.");
+      setAuthMessage(
+        "Tài khoản đã được tạo. Vui lòng kiểm tra email xác nhận.",
+      );
       return;
     }
 
@@ -1145,8 +1155,7 @@ export default function Home() {
               Gói đơn giản để bắt đầu bán hàng đều hơn.
             </h2>
           </div>
-          <p className="text-base leading-7 text-zinc-400">
-          </p>
+          <p className="text-base leading-7 text-zinc-400"></p>
         </div>
 
         <div className="mt-10 grid gap-5 md:grid-cols-3">
@@ -1320,11 +1329,7 @@ function AuthDialog({
             disabled={isLoading || !isConfigured}
             className="inline-flex h-14 w-full items-center justify-center rounded-lg bg-[linear-gradient(135deg,#fde68a_0%,#facc15_42%,#d97706_100%)] px-6 text-sm font-black text-black shadow-[0_20px_55px_rgba(250,204,21,0.24)] transition hover:-translate-y-0.5 hover:shadow-[0_26px_80px_rgba(250,204,21,0.34)] focus:outline-none focus:ring-2 focus:ring-yellow-300/70 focus:ring-offset-2 focus:ring-offset-black disabled:cursor-not-allowed disabled:opacity-70 disabled:hover:translate-y-0"
           >
-            {isLoading
-              ? "Đang xử lý..."
-              : isSignup
-                ? "Đăng ký"
-                : "Đăng nhập"}
+            {isLoading ? "Đang xử lý..." : isSignup ? "Đăng ký" : "Đăng nhập"}
           </button>
         </form>
 
@@ -1343,13 +1348,7 @@ function AuthDialog({
   );
 }
 
-function NavLink({
-  href,
-  children,
-}: {
-  href: string;
-  children: ReactNode;
-}) {
+function NavLink({ href, children }: { href: string; children: ReactNode }) {
   return (
     <a href={href} className="transition hover:text-yellow-300">
       {children}
