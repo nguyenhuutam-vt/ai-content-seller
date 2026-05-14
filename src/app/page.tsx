@@ -67,6 +67,7 @@ const MAX_PRODUCT_NAME_LENGTH = 120;
 const HASHTAG_MIN_COUNT = 5;
 const HASHTAG_MAX_COUNT = 8;
 const RECENT_GENERATION_LIMIT = 5;
+const AUTH_SESSION_READY_TIMEOUT_MS = 5_000;
 
 const generatorSteps = [
   "Nhập sản phẩm",
@@ -833,16 +834,46 @@ export default function Home() {
     }
 
     let isMounted = true;
-
-    supabase.auth.getSession().then(({ data }) => {
+    const authReadyTimeout = window.setTimeout(() => {
       if (!isMounted) {
         return;
       }
 
-      setUserEmail(data.session?.user.email ?? null);
-      setUserId(data.session?.user.id ?? null);
+      setUserEmail(null);
+      setUserId(null);
       setIsAuthReady(true);
-    });
+    }, AUTH_SESSION_READY_TIMEOUT_MS);
+
+    void Promise.resolve()
+      .then(() => supabase.auth.getSession())
+      .then(({ data }) => {
+        if (!isMounted) {
+          return;
+        }
+
+        setUserEmail(data.session?.user.email ?? null);
+        setUserId(data.session?.user.id ?? null);
+      })
+      .catch((error: unknown) => {
+        if (!isMounted) {
+          return;
+        }
+
+        console.error(
+          "Supabase session read error",
+          error instanceof Error ? error.message : "Unknown error",
+        );
+        setUserEmail(null);
+        setUserId(null);
+      })
+      .finally(() => {
+        if (!isMounted) {
+          return;
+        }
+
+        window.clearTimeout(authReadyTimeout);
+        setIsAuthReady(true);
+      });
 
     const {
       data: { subscription },
@@ -854,6 +885,7 @@ export default function Home() {
 
     return () => {
       isMounted = false;
+      window.clearTimeout(authReadyTimeout);
       subscription.unsubscribe();
     };
   }, [supabase]);
