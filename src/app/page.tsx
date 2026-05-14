@@ -52,6 +52,8 @@ const platforms = ["Shopee", "TikTok Shop", "Facebook"] as const;
 const tones = ["Chuyên nghiệp", "Gen Z", "Sang trọng", "Viral"] as const;
 const MIN_PRODUCT_NAME_LENGTH = 3;
 const MAX_PRODUCT_NAME_LENGTH = 120;
+const HASHTAG_MIN_COUNT = 5;
+const HASHTAG_MAX_COUNT = 8;
 
 const generatorSteps = [
   "Nhập sản phẩm",
@@ -530,6 +532,8 @@ function isGeneratedContent(value: GenerateResponse): value is GeneratedContent 
     "description" in value &&
     typeof value.caption === "string" &&
     Array.isArray(value.hashtags) &&
+    value.hashtags.length >= HASHTAG_MIN_COUNT &&
+    value.hashtags.length <= HASHTAG_MAX_COUNT &&
     value.hashtags.every(
       (hashtag) => typeof hashtag === "string" && hashtag.trim().length > 0,
     ) &&
