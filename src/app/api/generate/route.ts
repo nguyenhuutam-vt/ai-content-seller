@@ -1,9 +1,12 @@
 import { createHmac, randomUUID, timingSafeEqual } from "crypto";
 
+import { createClient as createSupabaseServerClient } from "@/lib/supabase/server";
+
 export const runtime = "nodejs";
 
 const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
 const OPENAI_MODEL = "gpt-5.4-nano";
+const DEFAULT_DAILY_LIMIT = 10;
 const MIN_PRODUCT_NAME_LENGTH = 3;
 const MAX_PRODUCT_NAME_LENGTH = 120;
 const MAX_OUTPUT_TOKENS = 380;
@@ -25,6 +28,38 @@ type GeneratedContent = {
   hashtags: string[];
   cta: string;
   description: string;
+};
+
+type UserProfile = {
+  id: string;
+  email: string | null;
+  plan: string | null;
+  daily_limit: number | null;
+};
+
+type UsageQuota = {
+  userId: string;
+  dailyLimit: number;
+  usedToday: number;
+  remainingToday: number;
+};
+
+type ReserveQuotaResult =
+  | {
+      ok: true;
+      reservationId: string;
+      dailyLimit: number;
+      generationCountBefore: number;
+    }
+  | { ok: false; reason: "limit"; dailyLimit: number; usedToday: number }
+  | { ok: false; reason: "rpc_error"; message?: string };
+
+type ActiveGenerationQuota = {
+  userId: string;
+  supabase: NonNullable<Awaited<ReturnType<typeof getSupabaseClientOrNull>>>;
+  reservationId: string;
+  dailyLimit: number;
+  generationCountBefore: number;
 };
 
 type ValidatedGenerateInput =
@@ -102,6 +137,51 @@ export async function POST(request: Request) {
     );
   }
 
+  const authQuotaCtx = await resolveAuthenticatedGenerateContext();
+
+  if (!authQuotaCtx.ok) {
+    return Response.json(
+      { error: "Không kiểm tra được lượt sử dụng. Vui lòng thử lại sau." },
+      { status: 500, headers: getRateLimitHeaders(rateLimit) },
+    );
+  }
+
+  let activeQuota: ActiveGenerationQuota | undefined;
+
+  if (authQuotaCtx.mode === "authenticated") {
+    const reserved = await reserveGenerationQuota(authQuotaCtx.supabase);
+
+    if (!reserved.ok) {
+      if (reserved.reason === "limit") {
+        return Response.json(
+          {
+            error: "Bạn đã dùng hết lượt miễn phí hôm nay.",
+            usage: getUsageResponse({
+              userId: authQuotaCtx.userId,
+              dailyLimit: reserved.dailyLimit,
+              usedToday: reserved.usedToday,
+              remainingToday: Math.max(reserved.dailyLimit - reserved.usedToday, 0),
+            }),
+          },
+          { status: 429, headers: getRateLimitHeaders(rateLimit) },
+        );
+      }
+
+      return Response.json(
+        { error: "Không kiểm tra được lượt sử dụng. Vui lòng thử lại sau." },
+        { status: 503, headers: getRateLimitHeaders(rateLimit) },
+      );
+    }
+
+    activeQuota = {
+      userId: authQuotaCtx.userId,
+      supabase: authQuotaCtx.supabase,
+      reservationId: reserved.reservationId,
+      dailyLimit: reserved.dailyLimit,
+      generationCountBefore: reserved.generationCountBefore,
+    };
+  }
+
   try {
     const openAIResponse = await fetch(OPENAI_RESPONSES_URL, {
       method: "POST",
@@ -164,6 +244,8 @@ export async function POST(request: Request) {
     if (!openAIResponse.ok) {
       console.error("OpenAI API error", { status: openAIResponse.status });
 
+      await releaseGenerationReservationSafe(activeQuota);
+
       return Response.json(
         { error: "Không thể tạo nội dung lúc này. Vui lòng thử lại sau." },
         { status: 502, headers: getRateLimitHeaders(rateLimit) },
@@ -176,6 +258,8 @@ export async function POST(request: Request) {
     if (!outputText) {
       console.error("OpenAI response missing output text");
 
+      await releaseGenerationReservationSafe(activeQuota);
+
       return Response.json(
         { error: "AI chưa trả về nội dung hợp lệ. Vui lòng thử lại." },
         { status: 502, headers: getRateLimitHeaders(rateLimit) },
@@ -187,23 +271,272 @@ export async function POST(request: Request) {
     if (!generatedContent) {
       console.error("OpenAI response did not match expected JSON");
 
+      await releaseGenerationReservationSafe(activeQuota);
+
       return Response.json(
         { error: "AI trả về định dạng không hợp lệ. Vui lòng thử lại." },
         { status: 502, headers: getRateLimitHeaders(rateLimit) },
       );
     }
 
-    return Response.json(generatedContent, {
+    let usage: ReturnType<typeof getUsageResponse> | undefined;
+
+    if (activeQuota) {
+      const saved = await saveGeneration({
+        userId: activeQuota.userId,
+        input,
+        content: generatedContent,
+      });
+
+      if (!saved) {
+        await releaseGenerationReservationSafe(activeQuota);
+
+        return Response.json(
+          {
+            error:
+              "Nội dung đã tạo xong nhưng chưa lưu được vào lịch sử. Vui lòng thử lại.",
+          },
+          { status: 502, headers: getRateLimitHeaders(rateLimit) },
+        );
+      }
+
+      await releaseGenerationReservationSafe(activeQuota);
+
+      const usedToday = activeQuota.generationCountBefore + 1;
+
+      usage = getUsageResponse({
+        userId: activeQuota.userId,
+        dailyLimit: activeQuota.dailyLimit,
+        usedToday,
+        remainingToday: Math.max(activeQuota.dailyLimit - usedToday, 0),
+      });
+    }
+
+    return Response.json({ ...generatedContent, usage }, {
       headers: getRateLimitHeaders(rateLimit),
     });
   } catch (error) {
     console.error("Generate route error", getSafeErrorMessage(error));
+
+    await releaseGenerationReservationSafe(activeQuota);
 
     return Response.json(
       { error: "Không thể kết nối tới dịch vụ tạo nội dung." },
       { status: 502, headers: getRateLimitHeaders(rateLimit) },
     );
   }
+}
+
+async function resolveAuthenticatedGenerateContext(): Promise<
+  | { ok: false }
+  | { ok: true; mode: "anonymous" }
+  | {
+      ok: true;
+      mode: "authenticated";
+      supabase: NonNullable<Awaited<ReturnType<typeof getSupabaseClientOrNull>>>;
+      userId: string;
+    }
+> {
+  const supabase = await getSupabaseClientOrNull();
+
+  if (!supabase) {
+    return { ok: true, mode: "anonymous" };
+  }
+
+  const {
+    data: { user },
+    error: userError,
+  } = await supabase.auth.getUser();
+
+  if (userError || !user) {
+    return { ok: true, mode: "anonymous" };
+  }
+
+  const profile = await getOrCreateProfile({
+    userId: user.id,
+    email: user.email ?? null,
+  });
+
+  if (!profile) {
+    return { ok: false };
+  }
+
+  return { ok: true, mode: "authenticated", supabase, userId: user.id };
+}
+
+async function reserveGenerationQuota(
+  supabase: NonNullable<Awaited<ReturnType<typeof getSupabaseClientOrNull>>>,
+): Promise<ReserveQuotaResult> {
+  const { data, error } = await supabase.rpc("reserve_generation_quota");
+
+  if (error) {
+    console.error("reserve_generation_quota RPC error", error.message);
+
+    return { ok: false, reason: "rpc_error", message: error.message };
+  }
+
+  const payload = data as unknown;
+
+  if (!isRecord(payload) || typeof payload.ok !== "boolean") {
+    return { ok: false, reason: "rpc_error" };
+  }
+
+  if (!payload.ok) {
+    if (payload.reason === "limit") {
+      const dailyLimit =
+        typeof payload.daily_limit === "number" && payload.daily_limit > 0
+          ? payload.daily_limit
+          : DEFAULT_DAILY_LIMIT;
+      const usedToday =
+        typeof payload.used_today === "number" ? payload.used_today : dailyLimit;
+
+      return { ok: false, reason: "limit", dailyLimit, usedToday };
+    }
+
+    return { ok: false, reason: "rpc_error" };
+  }
+
+  const reservationId =
+    typeof payload.reservation_id === "string" ? payload.reservation_id : null;
+
+  if (!reservationId) {
+    return { ok: false, reason: "rpc_error" };
+  }
+
+  const dailyLimit =
+    typeof payload.daily_limit === "number" && payload.daily_limit > 0
+      ? payload.daily_limit
+      : DEFAULT_DAILY_LIMIT;
+  const generationCountBefore =
+    typeof payload.generation_count_before === "number"
+      ? payload.generation_count_before
+      : 0;
+
+  return {
+    ok: true,
+    reservationId,
+    dailyLimit,
+    generationCountBefore,
+  };
+}
+
+async function releaseGenerationReservationSafe(activeQuota: ActiveGenerationQuota | undefined) {
+  if (!activeQuota) {
+    return;
+  }
+
+  const { error } = await activeQuota.supabase.rpc("release_generation_reservation", {
+    p_reservation_id: activeQuota.reservationId,
+  });
+
+  if (error) {
+    console.error("release_generation_reservation RPC error", error.message);
+  }
+}
+
+async function getSupabaseClientOrNull() {
+  try {
+    return await createSupabaseServerClient();
+  } catch (error) {
+    console.error(
+      "Supabase server client unavailable",
+      getSafeErrorMessage(error),
+    );
+    return null;
+  }
+}
+
+async function getOrCreateProfile({
+  userId,
+  email,
+}: {
+  userId: string;
+  email: string | null;
+}) {
+  const supabase = await getSupabaseClientOrNull();
+
+  if (!supabase) {
+    return null;
+  }
+
+  const { data, error } = await supabase
+    .from("profiles")
+    .select("id, email, plan, daily_limit")
+    .eq("id", userId)
+    .maybeSingle()
+    .returns<UserProfile | null>();
+
+  if (error) {
+    console.error("Supabase profile select error", error.message);
+    return null;
+  }
+
+  if (data) {
+    return data;
+  }
+
+  const fallbackProfile: UserProfile = {
+    id: userId,
+    email,
+    plan: "free",
+    daily_limit: DEFAULT_DAILY_LIMIT,
+  };
+
+  const { data: insertedProfile, error: insertError } = await supabase
+    .from("profiles")
+    .insert(fallbackProfile)
+    .select("id, email, plan, daily_limit")
+    .single()
+    .returns<UserProfile>();
+
+  if (insertError) {
+    console.error("Supabase profile insert error", insertError.message);
+    return fallbackProfile;
+  }
+
+  return insertedProfile;
+}
+
+async function saveGeneration({
+  userId,
+  input,
+  content,
+}: {
+  userId: string;
+  input: Extract<ValidatedGenerateInput, { ok: true }>;
+  content: GeneratedContent;
+}) {
+  const supabase = await getSupabaseClientOrNull();
+
+  if (!supabase) {
+    return false;
+  }
+
+  const { error } = await supabase.from("generations").insert({
+    user_id: userId,
+    product_name: input.productName,
+    platform: input.platform,
+    tone: input.tone,
+    caption: content.caption,
+    hashtags: content.hashtags,
+    cta: content.cta,
+    description: content.description,
+  });
+
+  if (error) {
+    console.error("Supabase generation insert error", error.message);
+    return false;
+  }
+
+  return true;
+}
+
+function getUsageResponse(quota: UsageQuota) {
+  return {
+    dailyLimit: quota.dailyLimit,
+    usedToday: quota.usedToday,
+    remainingToday: quota.remainingToday,
+  };
 }
 
 function validateGenerateInput(body: unknown): ValidatedGenerateInput {

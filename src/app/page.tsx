@@ -9,6 +9,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { track } from "@vercel/analytics";
 
 import {
   createClient as createSupabaseClient,
@@ -41,7 +42,7 @@ const plans = [
   },
   {
     name: "Pro",
-    price: "99k/tháng",
+    price: "99.000đ/tháng",
     description: "Tạo nội dung hằng ngày cho shop đang tăng trưởng.",
     highlighted: true,
   },
@@ -52,7 +53,46 @@ const plans = [
   },
 ];
 
-const stats = ["Caption", "Hashtag", "Mô tả", "CTA"];
+const stats = [
+  "Dành cho seller Việt Nam",
+  "Tạo content trong vài giây",
+  "Không cần nghĩ caption mỗi ngày",
+  "Shopee + TikTok Shop",
+];
+const proBenefits = [
+  "100 lượt tạo content/ngày",
+  "Lưu lịch sử",
+  "Ưu tiên tính năng mới",
+] as const;
+
+const faqs = [
+  {
+    question: "AI có miễn phí không?",
+    answer:
+      "Có. Bạn có thể dùng gói Free để tạo nội dung thử. Gói Pro phù hợp khi shop cần tạo nhiều content hơn mỗi ngày.",
+  },
+  {
+    question: "Có hỗ trợ TikTok Shop không?",
+    answer:
+      "Có. Công cụ hỗ trợ TikTok Shop, Shopee và Facebook, với caption, hashtag, mô tả và CTA theo từng kênh bán.",
+  },
+  {
+    question: "Có cần biết prompt không?",
+    answer:
+      "Không. Chỉ cần nhập tên sản phẩm, chọn kênh và tone. AI sẽ tự biến brief ngắn thành bản nháp tiếng Việt dễ dùng.",
+  },
+] as const;
+
+const BANK_NAME = "Tên ngân hàng của tôi";
+const BANK_ACCOUNT = "Số tài khoản của tôi";
+const BANK_ACCOUNT_NAME = "Tên chủ tài khoản";
+
+const manualPaymentDetails = [
+  ["Bank", BANK_NAME],
+  ["Account", BANK_ACCOUNT],
+  ["Name", BANK_ACCOUNT_NAME],
+  ["Note", "PRO + email đăng nhập"],
+] as const;
 
 const navLinks = [
   { href: "#features", label: "Tính năng" },
@@ -69,6 +109,7 @@ const HASHTAG_MIN_COUNT = 5;
 const HASHTAG_MAX_COUNT = 8;
 const RECENT_GENERATION_LIMIT = 5;
 const AUTH_SESSION_READY_TIMEOUT_MS = 5_000;
+const DEFAULT_DAILY_LIMIT = 10;
 
 const generatorSteps = [
   "Nhập sản phẩm",
@@ -97,6 +138,17 @@ type Tone = (typeof tones)[number];
 type Feature = (typeof features)[number];
 type Plan = (typeof plans)[number];
 type AuthMode = "login" | "signup";
+type AccountPlan = "free" | "pro";
+type UpgradeSource = "generator_usage" | "pricing_pro_card";
+type AnalyticsEventName =
+  | "generate_clicked"
+  | "generation_success"
+  | "generation_failed"
+  | "upgrade_clicked";
+type AnalyticsEventProperties = Record<
+  string,
+  string | number | boolean | null | undefined
+>;
 
 type GeneratedContent = {
   caption: string;
@@ -105,7 +157,19 @@ type GeneratedContent = {
   description: string;
 };
 
-type GenerateResponse = GeneratedContent | { error?: string };
+type DailyUsage = {
+  dailyLimit: number;
+  usedToday: number;
+  remainingToday: number;
+};
+
+type GenerateSuccessResponse = GeneratedContent & {
+  usage?: DailyUsage;
+};
+
+type GenerateResponse =
+  | GenerateSuccessResponse
+  | { error?: string; usage?: DailyUsage };
 type SupabaseBrowserClient = ReturnType<typeof createSupabaseClient>;
 
 type RecentGeneration = GeneratedContent & {
@@ -116,30 +180,19 @@ type RecentGeneration = GeneratedContent & {
   created_at: string | null;
 };
 
-type GenerationInsert = {
-  user_id: string;
-  product_name: string;
-  platform: Platform;
-  tone: Tone;
-  caption: string;
-  hashtags: string[];
-  cta: string;
-  description: string;
-};
-
-type GenerationSaveInput = {
-  productName: string;
-  platform: Platform;
-  tone: Tone;
-  content: GeneratedContent;
+type UsageProfile = {
+  plan: string | null;
+  daily_limit: number | null;
 };
 
 function GeneratorDemoSection({
   supabase,
   userId,
+  onUpgradeClick,
 }: {
   supabase: SupabaseBrowserClient | null;
   userId: string | null;
+  onUpgradeClick: (source: UpgradeSource) => void;
 }) {
   const [productName, setProductName] = useState(
     "Túi đeo chéo mini chống nước",
@@ -155,6 +208,11 @@ function GeneratorDemoSection({
   >([]);
   const [isHistoryLoading, setIsHistoryLoading] = useState(false);
   const [historyErrorMessage, setHistoryErrorMessage] = useState<string | null>(
+    null,
+  );
+  const [dailyUsage, setDailyUsage] = useState<DailyUsage | null>(null);
+  const [accountPlan, setAccountPlan] = useState<AccountPlan>("free");
+  const [usageErrorMessage, setUsageErrorMessage] = useState<string | null>(
     null,
   );
 
@@ -207,92 +265,75 @@ function GeneratorDemoSection({
     setRecentGenerations(data ?? []);
   }, [supabase, userId]);
 
-  useEffect(() => {
-    let cancelled = false;
-
-    async function loadRecentGenerations() {
-      if (!supabase || !userId) {
-        if (!cancelled) {
-          setRecentGenerations([]);
-          setHistoryErrorMessage(null);
-          setIsHistoryLoading(false);
-        }
-        return;
+  const fetchDailyUsage = useCallback(async () => {
+    if (!supabase || !userId) {
+      if (isMountedRef.current) {
+        setDailyUsage(null);
+        setAccountPlan("free");
+        setUsageErrorMessage(null);
       }
-
-      if (!cancelled) {
-        setIsHistoryLoading(true);
-        setHistoryErrorMessage(null);
-      }
-
-      const { data, error } = await supabase
-        .from("generations")
-        .select(
-          "id, product_name, platform, tone, caption, hashtags, cta, description, created_at",
-        )
-        .eq("user_id", userId)
-        .order("created_at", { ascending: false })
-        .limit(RECENT_GENERATION_LIMIT)
-        .returns<RecentGeneration[]>();
-
-      if (cancelled) {
-        return;
-      }
-
-      setIsHistoryLoading(false);
-
-      if (error) {
-        console.error("Supabase generations select error", error.message);
-        setRecentGenerations([]);
-        setHistoryErrorMessage("Không tải được lịch sử gần đây.");
-        return;
-      }
-
-      setRecentGenerations(data ?? []);
+      return;
     }
 
-    void loadRecentGenerations();
+    const todayRange = getVietnamTodayRange();
+    const { data: profile, error: profileError } = await supabase
+      .from("profiles")
+      .select("plan, daily_limit")
+      .eq("id", userId)
+      .maybeSingle()
+      .returns<UsageProfile | null>();
 
-    return () => {
-      cancelled = true;
-    };
+    if (!isMountedRef.current) {
+      return;
+    }
+
+    if (profileError) {
+      console.error("Supabase profile select error", profileError.message);
+      setDailyUsage(null);
+      setUsageErrorMessage("Không tải được lượt còn lại.");
+      return;
+    }
+
+    const { count, error: countError } = await supabase
+      .from("generations")
+      .select("id", { count: "exact", head: true })
+      .eq("user_id", userId)
+      .gte("created_at", todayRange.startIso)
+      .lt("created_at", todayRange.endIso);
+
+    if (!isMountedRef.current) {
+      return;
+    }
+
+    if (countError) {
+      console.error("Supabase generations count error", countError.message);
+      setDailyUsage(null);
+      setUsageErrorMessage("Không tải được lượt còn lại.");
+      return;
+    }
+
+    const dailyLimit =
+      typeof profile?.daily_limit === "number" && profile.daily_limit > 0
+        ? profile.daily_limit
+        : DEFAULT_DAILY_LIMIT;
+    const usedToday = count ?? 0;
+
+    setAccountPlan(normalizeAccountPlan(profile?.plan));
+    setDailyUsage({
+      dailyLimit,
+      usedToday,
+      remainingToday: Math.max(dailyLimit - usedToday, 0),
+    });
+    setUsageErrorMessage(null);
   }, [supabase, userId]);
 
-  async function saveGeneratedContent({
-    productName: savedProductName,
-    platform: savedPlatform,
-    tone: savedTone,
-    content: generatedContent,
-  }: GenerationSaveInput) {
-    if (!supabase || !userId) {
-      return;
-    }
+  useEffect(() => {
+    void Promise.resolve().then(fetchDailyUsage);
+  }, [fetchDailyUsage]);
 
-    const generation: GenerationInsert = {
-      user_id: userId,
-      product_name: savedProductName,
-      platform: savedPlatform,
-      tone: savedTone,
-      caption: generatedContent.caption,
-      hashtags: generatedContent.hashtags,
-      cta: generatedContent.cta,
-      description: generatedContent.description,
-    };
-
-    setHistoryErrorMessage(null);
-
-    const { error } = await supabase.from("generations").insert(generation);
-
-    if (error) {
-      console.error("Supabase generations insert error", error.message);
-      setHistoryErrorMessage(
-        "Nội dung đã tạo xong nhưng chưa lưu được vào lịch sử.",
-      );
-      return;
-    }
-
-    await fetchRecentGenerations();
-  }
+  useEffect(() => {
+    void Promise.resolve().then(fetchRecentGenerations);
+  }, [fetchRecentGenerations]);
 
   async function handleGenerate(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -301,12 +342,24 @@ function GeneratorDemoSection({
       return;
     }
 
+    const analyticsProperties = getGeneratorAnalyticsProperties({
+      platform,
+      tone,
+      accountPlan,
+      userId,
+    });
     const nextProductNameError = getProductNameError(productName);
+
+    trackAnalyticsEvent("generate_clicked", analyticsProperties);
 
     if (nextProductNameError) {
       setContent(null);
       setErrorMessage(null);
       setProductNameError(nextProductNameError);
+      trackAnalyticsEvent("generation_failed", {
+        ...analyticsProperties,
+        reason: "validation",
+      });
       return;
     }
 
@@ -314,6 +367,9 @@ function GeneratorDemoSection({
     setContent(null);
     setErrorMessage(null);
     setProductNameError(null);
+
+    let failedStatus: number | undefined;
+    let failedReason: "request_error" | "invalid_response" = "request_error";
 
     try {
       const submittedProductName = productName.trim();
@@ -332,21 +388,36 @@ function GeneratorDemoSection({
       const data = (await response.json()) as GenerateResponse;
 
       if (!response.ok) {
+        failedStatus = response.status;
+
+        if (data.usage) {
+          setDailyUsage(data.usage);
+        }
+
         throw new Error(getGenerateErrorMessage(data));
       }
 
       if (!isGeneratedContent(data)) {
+        failedReason = "invalid_response";
         throw new Error("API trả về định dạng không hợp lệ.");
       }
 
       setContent(data);
-      void saveGeneratedContent({
-        productName: submittedProductName,
-        platform: submittedPlatform,
-        tone: submittedTone,
-        content: data,
-      });
+      trackAnalyticsEvent("generation_success", analyticsProperties);
+
+      if (data.usage) {
+        setDailyUsage(data.usage);
+      } else {
+        void fetchDailyUsage();
+      }
+
+      void fetchRecentGenerations();
     } catch (error) {
+      trackAnalyticsEvent("generation_failed", {
+        ...analyticsProperties,
+        reason: failedReason,
+        status: failedStatus,
+      });
       setErrorMessage(
         error instanceof Error
           ? error.message
@@ -360,6 +431,7 @@ function GeneratorDemoSection({
   return (
     <section
       id="generator"
+      aria-labelledby="generator-title"
       className="relative isolate overflow-hidden border-y border-yellow-300/10 bg-[#050505]"
     >
       <div className="absolute inset-0 -z-10 bg-[radial-gradient(circle_at_50%_0%,rgba(250,204,21,0.22),transparent_32%),radial-gradient(circle_at_86%_72%,rgba(245,158,11,0.16),transparent_28%),linear-gradient(180deg,#070707_0%,#020202_100%)]" />
@@ -372,7 +444,10 @@ function GeneratorDemoSection({
             <p className="inline-flex rounded-lg border border-yellow-300/25 bg-yellow-300/10 px-3 py-2 text-xs font-extrabold uppercase text-yellow-100 shadow-[0_0_36px_rgba(250,204,21,0.16)]">
               AI Generator Demo
             </p>
-            <h2 className="mt-6 max-w-2xl text-4xl font-black leading-[1.05] text-white md:text-6xl">
+            <h2
+              id="generator-title"
+              className="mt-6 max-w-2xl text-4xl font-black leading-[1.05] text-white md:text-6xl"
+            >
               Tạo content bán hàng trong vài giây.
             </h2>
             <p className="mt-6 max-w-xl text-base leading-8 text-zinc-400 md:text-lg">
@@ -395,6 +470,7 @@ function GeneratorDemoSection({
         <div className="mt-12 grid gap-6 lg:grid-cols-[0.92fr_1.08fr]">
           <form
             onSubmit={handleGenerate}
+            aria-label="Tạo content bán hàng bằng AI"
             className="relative overflow-hidden rounded-lg border border-white/10 bg-[linear-gradient(145deg,rgba(22,22,22,0.96),rgba(5,5,5,0.96))] p-6 shadow-[0_30px_90px_rgba(0,0,0,0.55)] transition duration-500 ease-out hover:-translate-y-1 hover:border-yellow-300/35 hover:shadow-[0_36px_110px_rgba(250,204,21,0.12)] md:p-7"
           >
             <div className="pointer-events-none absolute -right-24 -top-24 h-56 w-56 rounded-full bg-yellow-300/10 blur-3xl" />
@@ -413,6 +489,8 @@ function GeneratorDemoSection({
               <label className="block">
                 <span className={fieldLabelClassName}>Product name</span>
                 <input
+                  id="product-name"
+                  name="productName"
                   value={productName}
                   onChange={(event) => {
                     const nextProductName = event.target.value;
@@ -425,17 +503,11 @@ function GeneratorDemoSection({
                   }}
                   placeholder="Ví dụ: Nến thơm thư giãn hương gỗ"
                   aria-describedby={
-                    productNameError
-                      ? "product-name-help product-name-error"
-                      : "product-name-help"
+                    productNameError ? "product-name-error" : undefined
                   }
                   aria-invalid={Boolean(productNameError)}
                   className={`${formControlClassName} placeholder:text-zinc-600`}
                 />
-                <p
-                  id="product-name-help"
-                  className="mt-2 text-xs font-medium leading-5 text-zinc-500"
-                ></p>
                 {productNameError ? (
                   <p
                     id="product-name-error"
@@ -450,6 +522,8 @@ function GeneratorDemoSection({
                 <label className="block">
                   <span className={fieldLabelClassName}>Platform</span>
                   <select
+                    id="platform"
+                    name="platform"
                     value={platform}
                     onChange={(event) =>
                       setPlatform(event.target.value as Platform)
@@ -465,6 +539,8 @@ function GeneratorDemoSection({
                 <label className="block">
                   <span className={fieldLabelClassName}>Tone</span>
                   <select
+                    id="tone"
+                    name="tone"
                     value={tone}
                     onChange={(event) => setTone(event.target.value as Tone)}
                     className={formControlClassName}
@@ -487,6 +563,40 @@ function GeneratorDemoSection({
                   <span aria-hidden="true">-&gt;</span>
                 </span>
               </button>
+
+              <div className="flex flex-col gap-3 text-xs font-bold leading-5 text-zinc-500 sm:flex-row sm:items-center sm:justify-between">
+                {userId ? (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <StatusPill className="border-yellow-300/25 bg-yellow-300/10 text-yellow-100">
+                      {getAccountPlanLabel(accountPlan)}
+                    </StatusPill>
+                    {dailyUsage ? (
+                      <p className="text-yellow-100">
+                        Còn {dailyUsage.remainingToday}/{dailyUsage.dailyLimit}{" "}
+                        lượt hôm nay
+                      </p>
+                    ) : (
+                      <p>{usageErrorMessage ?? "Đang tải lượt còn lại..."}</p>
+                    )}
+                  </div>
+                ) : (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <StatusPill className="border-white/10 bg-white/[0.04] text-zinc-300">
+                      Gói Free
+                    </StatusPill>
+                    <p>Khách vẫn dùng được demo miễn phí.</p>
+                  </div>
+                )}
+                {accountPlan === "free" ? (
+                  <button
+                    type="button"
+                    onClick={() => onUpgradeClick("generator_usage")}
+                    className="inline-flex h-10 items-center justify-center rounded-full border border-yellow-300/35 bg-yellow-300/10 px-4 text-xs font-black text-yellow-200 transition hover:border-yellow-300 hover:bg-yellow-300 hover:text-black focus:outline-none focus:ring-2 focus:ring-yellow-300/60"
+                  >
+                    Nâng cấp Pro
+                  </button>
+                ) : null}
+              </div>
             </div>
           </form>
 
@@ -829,6 +939,53 @@ function formatGenerationTime(value: string | null) {
   }).format(date);
 }
 
+function getVietnamTodayRange() {
+  const vietnamOffsetMs = 7 * 60 * 60 * 1000;
+  const dayMs = 24 * 60 * 60 * 1000;
+  const now = Date.now();
+  const startMs =
+    Math.floor((now + vietnamOffsetMs) / dayMs) * dayMs - vietnamOffsetMs;
+
+  return {
+    startIso: new Date(startMs).toISOString(),
+    endIso: new Date(startMs + dayMs).toISOString(),
+  };
+}
+
+function normalizeAccountPlan(plan: string | null | undefined): AccountPlan {
+  return plan?.toLowerCase() === "pro" ? "pro" : "free";
+}
+
+function getAccountPlanLabel(plan: AccountPlan) {
+  return plan === "pro" ? "Gói Pro" : "Gói Free";
+}
+
+function getGeneratorAnalyticsProperties({
+  platform,
+  tone,
+  accountPlan,
+  userId,
+}: {
+  platform: Platform;
+  tone: Tone;
+  accountPlan: AccountPlan;
+  userId: string | null;
+}) {
+  return {
+    platform,
+    tone,
+    plan: accountPlan,
+    authenticated: Boolean(userId),
+  };
+}
+
+function trackAnalyticsEvent(
+  name: AnalyticsEventName,
+  properties?: AnalyticsEventProperties,
+) {
+  track(name, properties);
+}
+
 function getProductNameError(productName: string) {
   const trimmedProductName = productName.trim();
 
@@ -882,6 +1039,7 @@ export default function Home() {
   const [authError, setAuthError] = useState<string | null>(null);
   const [authMessage, setAuthMessage] = useState<string | null>(null);
   const [isAuthLoading, setIsAuthLoading] = useState(false);
+  const [isUpgradeOpen, setIsUpgradeOpen] = useState(false);
 
   useEffect(() => {
     if (!supabase) {
@@ -1039,15 +1197,30 @@ export default function Home() {
     setUserId(null);
   }
 
+  function handleUpgradeClick(source: UpgradeSource) {
+    trackAnalyticsEvent("upgrade_clicked", {
+      source,
+      authenticated: Boolean(userId),
+    });
+    setIsUpgradeOpen(true);
+  }
+
   return (
     <main className="min-h-screen bg-[#080808] text-white">
       <header className="border-b border-white/10 bg-black/80 backdrop-blur">
         <div className="mx-auto flex max-w-7xl items-center justify-between px-6 py-5">
-          <a href="#" className="text-lg font-black tracking-tight">
+          <a
+            href="#"
+            aria-label="AI Content Seller trang chủ"
+            className="text-lg font-black tracking-tight"
+          >
             AI<span className="text-yellow-300">Content</span>Seller
           </a>
           <div className="flex items-center gap-4">
-            <nav className="hidden items-center gap-8 text-sm font-semibold text-zinc-300 md:flex">
+            <nav
+              aria-label="Điều hướng chính"
+              className="hidden items-center gap-8 text-sm font-semibold text-zinc-300 md:flex"
+            >
               {navLinks.map((link) => (
                 <NavLink key={link.href} href={link.href}>
                   {link.label}
@@ -1082,41 +1255,58 @@ export default function Home() {
         />
       ) : null}
 
-      <section className="relative overflow-hidden">
+      {isUpgradeOpen ? (
+        <UpgradeDialog
+          userEmail={userEmail}
+          onClose={() => setIsUpgradeOpen(false)}
+        />
+      ) : null}
+
+      <section aria-labelledby="hero-title" className="relative overflow-hidden">
         <div className="absolute inset-x-0 top-0 h-72 bg-[radial-gradient(circle_at_top,#facc15_0%,rgba(250,204,21,0.24)_30%,transparent_62%)]" />
         <div className="relative mx-auto grid max-w-7xl gap-12 px-6 py-16 md:py-24 lg:grid-cols-[1.02fr_0.98fr] lg:items-center">
           <div>
             <p className="mb-6 inline-flex rounded-full border border-yellow-300/30 bg-yellow-300 px-4 py-2 text-sm font-black text-black shadow-[0_0_40px_rgba(250,204,21,0.25)]">
-              AI content engine cho seller Việt Nam
+              Dành cho seller Việt Nam
             </p>
-            <h1 className="max-w-4xl text-5xl font-black leading-[1.04] tracking-tight sm:text-6xl lg:text-7xl">
-              AI viết content bán hàng cho Shopee & TikTok Shop
+            <h1
+              id="hero-title"
+              className="max-w-4xl text-5xl font-black leading-[1.04] tracking-tight sm:text-6xl lg:text-7xl"
+            >
+              Hết bí caption: tạo content bán hàng trong vài giây
             </h1>
             <p className="mt-7 max-w-2xl text-lg leading-8 text-zinc-300">
-              Người bán có thể tạo caption, hashtag, mô tả sản phẩm và CTA chỉ
-              trong vài giây để đăng bài nhanh hơn, đều hơn và thuyết phục hơn.
+              Nhập sản phẩm một lần để có caption, hashtag, mô tả và CTA cho
+              Shopee hoặc TikTok Shop. Không cần nghĩ caption mỗi ngày, không
+              cần biết prompt.
             </p>
 
             <div className="mt-10 flex flex-col gap-3 sm:flex-row">
               <a
-                href="#pricing"
+                href="#generator"
                 className="inline-flex h-12 items-center justify-center rounded-full bg-yellow-300 px-7 text-sm font-black text-black shadow-[0_14px_40px_rgba(250,204,21,0.28)] transition hover:bg-yellow-200"
               >
-                Dùng thử miễn phí
+                Tạo content miễn phí ngay
               </a>
               <a
                 href="#demo"
                 className="inline-flex h-12 items-center justify-center rounded-full border border-white/15 bg-white/10 px-7 text-sm font-black text-white transition hover:border-yellow-300/70 hover:text-yellow-200"
               >
-                Xem demo
+                Xem mẫu content
               </a>
             </div>
 
-            <div className="mt-10 grid max-w-xl grid-cols-4 gap-2 rounded-2xl border border-white/10 bg-white/[0.04] p-2">
+            <p className="mt-5 max-w-xl text-sm font-semibold leading-6 text-zinc-400">
+              Phù hợp cho shop cần đăng đều trên sàn, seller livestream và đội
+              vận hành muốn có bản nháp tiếng Việt nhanh trước khi chỉnh giọng
+              thương hiệu.
+            </p>
+
+            <div className="mt-10 grid max-w-xl grid-cols-2 gap-2 rounded-2xl border border-white/10 bg-white/[0.04] p-2 sm:grid-cols-4">
               {stats.map((item) => (
                 <div
                   key={item}
-                  className="rounded-xl bg-black px-3 py-4 text-center text-xs font-bold text-zinc-300"
+                  className="rounded-xl bg-black px-3 py-4 text-center text-xs font-bold leading-5 text-zinc-300"
                 >
                   {item}
                 </div>
@@ -1124,22 +1314,26 @@ export default function Home() {
             </div>
           </div>
 
-          <div
+          <section
             id="demo"
+            aria-labelledby="demo-title"
             className="rounded-[2rem] border border-yellow-300/20 bg-[#111] p-4 shadow-2xl shadow-yellow-300/10"
           >
             <div className="rounded-[1.5rem] border border-white/10 bg-black p-5">
               <div className="flex items-center justify-between border-b border-white/10 pb-4">
                 <div>
-                  <p className="text-sm font-black text-yellow-300">
+                  <h2
+                    id="demo-title"
+                    className="text-sm font-black text-yellow-300"
+                  >
                     Content preview
-                  </p>
+                  </h2>
                   <p className="mt-1 text-xs text-zinc-500">
                     Shopee + TikTok Shop
                   </p>
                 </div>
                 <span className="rounded-full bg-yellow-300 px-3 py-1 text-xs font-black text-black">
-                  8 giây
+                  Vài giây
                 </span>
               </div>
 
@@ -1167,19 +1361,30 @@ export default function Home() {
                 </div>
               </div>
             </div>
-          </div>
+          </section>
         </div>
       </section>
 
-      <GeneratorDemoSection supabase={supabase} userId={userId} />
+      <GeneratorDemoSection
+        supabase={supabase}
+        userId={userId}
+        onUpgradeClick={handleUpgradeClick}
+      />
 
-      <section id="features" className="bg-yellow-300 text-black">
+      <section
+        id="features"
+        aria-labelledby="features-title"
+        className="bg-yellow-300 text-black"
+      >
         <div className="mx-auto max-w-7xl px-6 py-16 md:py-20">
           <div className="max-w-3xl">
             <p className="text-sm font-black uppercase tracking-wide">
               Tạo content như một team marketing mini
             </p>
-            <h2 className="mt-4 text-4xl font-black tracking-tight md:text-5xl">
+            <h2
+              id="features-title"
+              className="mt-4 text-4xl font-black tracking-tight md:text-5xl"
+            >
               Tập trung vào sản phẩm, để AI lo phần chữ bán hàng.
             </h2>
           </div>
@@ -1192,23 +1397,70 @@ export default function Home() {
         </div>
       </section>
 
-      <section id="pricing" className="mx-auto max-w-7xl px-6 py-16 md:py-20">
+      <section
+        id="pricing"
+        aria-labelledby="pricing-title"
+        className="mx-auto max-w-7xl px-6 py-16 md:py-20"
+      >
         <div className="grid gap-6 md:grid-cols-[0.9fr_1.1fr] md:items-end">
           <div>
             <p className="text-sm font-black uppercase tracking-wide text-yellow-300">
               Pricing preview
             </p>
-            <h2 className="mt-4 text-4xl font-black tracking-tight md:text-5xl">
+            <h2
+              id="pricing-title"
+              className="mt-4 text-4xl font-black tracking-tight md:text-5xl"
+            >
               Gói đơn giản để bắt đầu bán hàng đều hơn.
             </h2>
           </div>
-          <p className="text-base leading-7 text-zinc-400"></p>
+          <p className="text-base leading-7 text-zinc-400">
+            Bắt đầu miễn phí để kiểm tra chất lượng nội dung trước khi nâng cấp
+            cho nhu cầu đăng bài hằng ngày.
+          </p>
         </div>
 
         <div className="mt-10 grid gap-5 md:grid-cols-3">
           {plans.map((plan) => (
-            <PricingCard key={plan.name} plan={plan} />
+            <PricingCard
+              key={plan.name}
+              plan={plan}
+              onUpgradeClick={() => handleUpgradeClick("pricing_pro_card")}
+            />
           ))}
+        </div>
+      </section>
+
+      <section
+        aria-labelledby="faq-title"
+        className="mx-auto max-w-7xl px-6 pb-16 md:pb-20"
+      >
+        <div className="rounded-3xl border border-white/10 bg-white/[0.04] p-6 md:p-8">
+          <p className="text-sm font-black uppercase tracking-wide text-yellow-300">
+            FAQ
+          </p>
+          <h2
+            id="faq-title"
+            className="mt-3 text-3xl font-black tracking-tight text-white md:text-4xl"
+          >
+            Câu hỏi thường gặp trước khi dùng thử
+          </h2>
+
+          <div className="mt-8 grid gap-4 md:grid-cols-3">
+            {faqs.map((faq) => (
+              <article
+                key={faq.question}
+                className="rounded-2xl border border-white/10 bg-black p-5"
+              >
+                <h3 className="text-lg font-black text-yellow-200">
+                  {faq.question}
+                </h3>
+                <p className="mt-3 text-sm font-medium leading-6 text-zinc-400">
+                  {faq.answer}
+                </p>
+              </article>
+            ))}
+          </div>
         </div>
       </section>
     </main>
@@ -1395,6 +1647,98 @@ function AuthDialog({
   );
 }
 
+function UpgradeDialog({
+  userEmail,
+  onClose,
+}: {
+  userEmail: string | null;
+  onClose: () => void;
+}) {
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 px-6 py-8 backdrop-blur-md"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="upgrade-dialog-title"
+    >
+      <div className="relative max-h-full w-full max-w-2xl overflow-y-auto rounded-lg border border-yellow-300/25 bg-[linear-gradient(145deg,rgba(18,18,18,0.98),rgba(4,4,4,0.98)_62%,rgba(28,19,5,0.96))] p-6 shadow-[0_30px_120px_rgba(250,204,21,0.18)] md:p-7">
+        <div className="pointer-events-none absolute -right-24 -top-24 h-64 w-64 rounded-full bg-yellow-300/14 blur-3xl" />
+        <div className="pointer-events-none absolute inset-x-8 top-0 h-px bg-gradient-to-r from-transparent via-yellow-200 to-transparent" />
+
+        <div className="relative flex items-start justify-between gap-4 border-b border-white/10 pb-5">
+          <div>
+            <p className="text-sm font-black uppercase text-yellow-200">
+              Manual upgrade
+            </p>
+            <h2
+              id="upgrade-dialog-title"
+              className="mt-2 text-3xl font-black text-white"
+            >
+              Nâng cấp Pro
+            </h2>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-white/10 bg-white/[0.04] text-lg font-black text-zinc-300 transition hover:border-yellow-300/50 hover:text-yellow-200 focus:outline-none focus:ring-2 focus:ring-yellow-300/60"
+            aria-label="Đóng hướng dẫn nâng cấp Pro"
+          >
+            ×
+          </button>
+        </div>
+
+        <div className="relative mt-6 grid gap-5 md:grid-cols-[0.9fr_1.1fr]">
+          <div className="rounded-lg border border-yellow-300/25 bg-yellow-300 p-5 text-black shadow-[0_24px_70px_rgba(250,204,21,0.18)]">
+            <p className="text-sm font-black uppercase text-black/60">Pro</p>
+            <p className="mt-3 text-4xl font-black">99.000đ/tháng</p>
+            <ul className="mt-5 space-y-3 text-sm font-black leading-6">
+              {proBenefits.map((benefit) => (
+                <li key={benefit}>✓ {benefit}</li>
+              ))}
+            </ul>
+          </div>
+
+          <div className="rounded-lg border border-white/10 bg-white/[0.045] p-5">
+            <p className="text-sm font-black text-yellow-200">
+              Cách thanh toán thủ công
+            </p>
+            <p className="mt-3 text-sm font-semibold leading-6 text-zinc-300">
+              Chuyển khoản ngân hàng hoặc ví điện tử. Sau khi thanh toán, gửi
+              email/tin nhắn để kích hoạt tài khoản.
+            </p>
+
+            <dl className="mt-5 grid gap-3">
+              {manualPaymentDetails.map(([label, value]) => (
+                <div
+                  key={label}
+                  className="flex flex-col gap-1 rounded-lg border border-white/10 bg-black/40 p-3 sm:flex-row sm:items-center sm:justify-between"
+                >
+                  <dt className="text-xs font-black uppercase text-zinc-500">
+                    {label}
+                  </dt>
+                  <dd className="text-sm font-black text-white">{value}</dd>
+                </div>
+              ))}
+            </dl>
+
+            <p className="mt-4 rounded-lg border border-yellow-300/20 bg-yellow-300/10 p-4 text-xs font-bold leading-5 text-yellow-100">
+              Email đăng nhập hiện tại: {userEmail ?? "chưa đăng nhập"}
+            </p>
+          </div>
+        </div>
+
+        <button
+          type="button"
+          onClick={onClose}
+          className="relative mt-6 inline-flex h-12 w-full items-center justify-center rounded-lg bg-[linear-gradient(135deg,#fde68a_0%,#facc15_42%,#d97706_100%)] px-6 text-sm font-black text-black shadow-[0_20px_55px_rgba(250,204,21,0.24)] transition hover:-translate-y-0.5 hover:shadow-[0_26px_80px_rgba(250,204,21,0.34)] focus:outline-none focus:ring-2 focus:ring-yellow-300/70 focus:ring-offset-2 focus:ring-offset-black"
+        >
+          Đã hiểu
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function NavLink({ href, children }: { href: string; children: ReactNode }) {
   return (
     <a href={href} className="transition hover:text-yellow-300">
@@ -1435,7 +1779,13 @@ function FeatureCard({ feature }: { feature: Feature }) {
   );
 }
 
-function PricingCard({ plan }: { plan: Plan }) {
+function PricingCard({
+  plan,
+  onUpgradeClick,
+}: {
+  plan: Plan;
+  onUpgradeClick: () => void;
+}) {
   return (
     <article
       className={`group rounded-3xl border p-6 transition-all duration-300 ease-out hover:-translate-y-2 ${
@@ -1462,16 +1812,29 @@ function PricingCard({ plan }: { plan: Plan }) {
       >
         {plan.description}
       </p>
-      <a
-        href="#"
-        className={`mt-7 inline-flex h-12 w-full items-center justify-center rounded-full text-sm font-black transition-all duration-300 ${
-          plan.highlighted
-            ? "bg-black text-yellow-300 hover:bg-zinc-900 group-hover:scale-[1.03]"
-            : "border border-white/15 text-white group-hover:border-black group-hover:bg-black group-hover:text-yellow-300"
-        }`}
-      >
-        Dùng thử miễn phí
-      </a>
+      {plan.highlighted ? (
+        <>
+          <ul className="mt-5 space-y-2 text-sm font-black leading-6 text-zinc-900">
+            {proBenefits.map((benefit) => (
+              <li key={benefit}>✓ {benefit}</li>
+            ))}
+          </ul>
+          <button
+            type="button"
+            onClick={onUpgradeClick}
+            className="mt-7 inline-flex h-12 w-full items-center justify-center rounded-full bg-black text-sm font-black text-yellow-300 transition-all duration-300 hover:bg-zinc-900 focus:outline-none focus:ring-2 focus:ring-black/50 group-hover:scale-[1.03]"
+          >
+            Nâng cấp Pro
+          </button>
+        </>
+      ) : (
+        <a
+          href="#generator"
+          className="mt-7 inline-flex h-12 w-full items-center justify-center rounded-full border border-white/15 text-sm font-black text-white transition-all duration-300 group-hover:border-black group-hover:bg-black group-hover:text-yellow-300"
+        >
+          Tạo content miễn phí
+        </a>
+      )}
     </article>
   );
 }
