@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import {
   type FormEvent,
   type ReactNode,
@@ -99,10 +100,18 @@ const navLinks = [
   { href: "#pricing", label: "Bảng giá" },
   { href: "#demo", label: "Demo" },
   { href: "#generator", label: "Generator" },
+  { href: "#image-generator", label: "Ảnh AI" },
 ] as const;
 
 const platforms = ["Shopee", "TikTok Shop", "Facebook"] as const;
 const tones = ["Chuyên nghiệp", "Gen Z", "Sang trọng", "Viral"] as const;
+const imagePlatforms = ["Shopee", "TikTok Shop"] as const;
+const imageStyles = [
+  "Shopee banner",
+  "TikTok thumbnail",
+  "Luxury product ad",
+  "Minimal clean product",
+] as const;
 const MIN_PRODUCT_NAME_LENGTH = 3;
 const MAX_PRODUCT_NAME_LENGTH = 120;
 const HASHTAG_MIN_COUNT = 5;
@@ -110,6 +119,8 @@ const HASHTAG_MAX_COUNT = 8;
 const RECENT_GENERATION_LIMIT = 5;
 const AUTH_SESSION_READY_TIMEOUT_MS = 5_000;
 const DEFAULT_DAILY_LIMIT = 10;
+const FREE_IMAGE_DAILY_LIMIT = 2;
+const PRO_IMAGE_DAILY_LIMIT = 20;
 
 const generatorSteps = [
   "Nhập sản phẩm",
@@ -135,6 +146,8 @@ const formControlClassName =
 
 type Platform = (typeof platforms)[number];
 type Tone = (typeof tones)[number];
+type ImagePlatform = (typeof imagePlatforms)[number];
+type ImageStyle = (typeof imageStyles)[number];
 type Feature = (typeof features)[number];
 type Plan = (typeof plans)[number];
 type AuthMode = "login" | "signup";
@@ -144,6 +157,9 @@ type AnalyticsEventName =
   | "generate_clicked"
   | "generation_success"
   | "generation_failed"
+  | "image_generate_clicked"
+  | "image_generation_success"
+  | "image_generation_failed"
   | "upgrade_clicked";
 type AnalyticsEventProperties = Record<
   string,
@@ -184,6 +200,22 @@ type UsageProfile = {
   plan: string | null;
   daily_limit: number | null;
 };
+
+type ImageUsageProfile = {
+  plan: string | null;
+};
+
+type GeneratedImage = {
+  imageDataUrl: string;
+  productName: string;
+  style: ImageStyle;
+  platform: ImagePlatform;
+  usage?: DailyUsage;
+};
+
+type GenerateImageResponse =
+  | GeneratedImage
+  | { error?: string; usage?: DailyUsage };
 
 function GeneratorDemoSection({
   supabase,
@@ -684,6 +716,420 @@ function GeneratorDemoSection({
   );
 }
 
+function ImageGenerationSection({
+  supabase,
+  userId,
+  onUpgradeClick,
+}: {
+  supabase: SupabaseBrowserClient | null;
+  userId: string | null;
+  onUpgradeClick: (source: UpgradeSource) => void;
+}) {
+  const [productName, setProductName] = useState("Set serum dưỡng sáng da");
+  const [style, setStyle] = useState<ImageStyle>("Shopee banner");
+  const [platform, setPlatform] = useState<ImagePlatform>("Shopee");
+  const [isLoading, setIsLoading] = useState(false);
+  const [image, setImage] = useState<GeneratedImage | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [productNameError, setProductNameError] = useState<string | null>(null);
+  const [dailyUsage, setDailyUsage] = useState<DailyUsage | null>(null);
+  const [accountPlan, setAccountPlan] = useState<AccountPlan>("free");
+  const [usageErrorMessage, setUsageErrorMessage] = useState<string | null>(
+    null,
+  );
+  const isMountedRef = useRef(true);
+  const imageRequestInFlightRef = useRef(false);
+
+  useEffect(() => {
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
+
+  const fetchImageDailyUsage = useCallback(async () => {
+    if (!supabase || !userId) {
+      if (isMountedRef.current) {
+        setDailyUsage(null);
+        setAccountPlan("free");
+        setUsageErrorMessage(null);
+      }
+      return;
+    }
+
+    const todayRange = getVietnamTodayRange();
+    const { data: profile, error: profileError } = await supabase
+      .from("profiles")
+      .select("plan")
+      .eq("id", userId)
+      .maybeSingle()
+      .returns<ImageUsageProfile | null>();
+
+    if (!isMountedRef.current) {
+      return;
+    }
+
+    if (profileError) {
+      console.error("Supabase image profile select error", profileError.message);
+      setDailyUsage(null);
+      setUsageErrorMessage("Không tải được lượt ảnh còn lại.");
+      return;
+    }
+
+    const { count, error: countError } = await supabase
+      .from("image_generations")
+      .select("id", { count: "exact", head: true })
+      .eq("user_id", userId)
+      .gte("created_at", todayRange.startIso)
+      .lt("created_at", todayRange.endIso);
+
+    if (!isMountedRef.current) {
+      return;
+    }
+
+    if (countError) {
+      console.error("Supabase image count error", countError.message);
+      setDailyUsage(null);
+      setUsageErrorMessage("Không tải được lượt ảnh còn lại.");
+      return;
+    }
+
+    const nextAccountPlan = normalizeAccountPlan(profile?.plan);
+    const dailyLimit = getImageDailyLimit(nextAccountPlan);
+    const usedToday = count ?? 0;
+
+    setAccountPlan(nextAccountPlan);
+    setDailyUsage({
+      dailyLimit,
+      usedToday,
+      remainingToday: Math.max(dailyLimit - usedToday, 0),
+    });
+    setUsageErrorMessage(null);
+  }, [supabase, userId]);
+
+  useEffect(() => {
+    void Promise.resolve().then(fetchImageDailyUsage);
+  }, [fetchImageDailyUsage]);
+
+  async function handleGenerateImage(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    if (isLoading || imageRequestInFlightRef.current) {
+      return;
+    }
+
+    const analyticsProperties = {
+      platform,
+      style,
+      plan: accountPlan,
+      authenticated: Boolean(userId),
+    };
+    const nextProductNameError = getProductNameError(productName);
+
+    trackAnalyticsEvent("image_generate_clicked", analyticsProperties);
+
+    if (nextProductNameError) {
+      setImage(null);
+      setErrorMessage(null);
+      setProductNameError(nextProductNameError);
+      trackAnalyticsEvent("image_generation_failed", {
+        ...analyticsProperties,
+        reason: "validation",
+      });
+      return;
+    }
+
+    imageRequestInFlightRef.current = true;
+    setIsLoading(true);
+    setImage(null);
+    setErrorMessage(null);
+    setProductNameError(null);
+
+    let failedStatus: number | undefined;
+    let failedReason: "request_error" | "invalid_response" = "request_error";
+
+    try {
+      const response = await fetch("/api/generate-image", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          productName: productName.trim(),
+          style,
+          platform,
+        }),
+      });
+      const data = (await response.json()) as GenerateImageResponse;
+
+      if (!response.ok) {
+        failedStatus = response.status;
+
+        if (data.usage) {
+          setDailyUsage(data.usage);
+        }
+
+        throw new Error(getGenerateImageErrorMessage(data));
+      }
+
+      if (!isGeneratedImage(data)) {
+        failedReason = "invalid_response";
+        throw new Error("API trả về định dạng ảnh không hợp lệ.");
+      }
+
+      setImage(data);
+      trackAnalyticsEvent("image_generation_success", analyticsProperties);
+
+      if (data.usage) {
+        setDailyUsage(data.usage);
+      } else {
+        void fetchImageDailyUsage();
+      }
+    } catch (error) {
+      trackAnalyticsEvent("image_generation_failed", {
+        ...analyticsProperties,
+        reason: failedReason,
+        status: failedStatus,
+      });
+      setErrorMessage(
+        error instanceof Error
+          ? error.message
+          : "Không thể tạo ảnh. Vui lòng thử lại.",
+      );
+    } finally {
+      imageRequestInFlightRef.current = false;
+      setIsLoading(false);
+    }
+  }
+
+  return (
+    <section
+      id="image-generator"
+      aria-labelledby="image-generator-title"
+      className="relative isolate overflow-hidden border-b border-yellow-300/10 bg-[#080808]"
+    >
+      <div className="absolute inset-0 -z-10 bg-[radial-gradient(circle_at_16%_0%,rgba(250,204,21,0.16),transparent_30%),linear-gradient(180deg,#090909_0%,#030303_100%)]" />
+      <div className="relative mx-auto max-w-7xl px-6 py-16 md:py-24">
+        <div className="grid gap-6 md:grid-cols-[0.9fr_1.1fr] md:items-end">
+          <div>
+            <p className="inline-flex rounded-lg border border-yellow-300/25 bg-yellow-300/10 px-3 py-2 text-xs font-extrabold uppercase text-yellow-100">
+              AI tạo ảnh bán hàng
+            </p>
+            <h2
+              id="image-generator-title"
+              className="mt-6 max-w-3xl text-4xl font-black leading-[1.05] text-white md:text-5xl"
+            >
+              Tạo visual marketing cho Shopee và TikTok Shop.
+            </h2>
+          </div>
+          <p className="text-base font-semibold leading-8 text-zinc-400">
+            Mỗi lần tạo dùng một prompt ngắn, một ảnh vuông chất lượng thấp để
+            giữ chi phí hợp lý cho MVP.
+          </p>
+        </div>
+
+        <div className="mt-10 grid gap-6 lg:grid-cols-[0.9fr_1.1fr]">
+          <form
+            onSubmit={handleGenerateImage}
+            aria-label="Tạo ảnh bán hàng bằng AI"
+            className="relative overflow-hidden rounded-lg border border-white/10 bg-[linear-gradient(145deg,rgba(22,22,22,0.96),rgba(5,5,5,0.96))] p-6 shadow-[0_30px_90px_rgba(0,0,0,0.52)] md:p-7"
+          >
+            <div className="pointer-events-none absolute -right-24 -top-24 h-56 w-56 rounded-full bg-yellow-300/10 blur-3xl" />
+            <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-yellow-200/70 to-transparent" />
+
+            <div className="relative flex items-center justify-between gap-4 border-b border-white/10 pb-5">
+              <PanelTitle title="Image brief" description="1 ảnh/lần tạo" />
+              <StatusPill className="border-yellow-300/25 bg-yellow-300/10 text-yellow-100">
+                gpt-image-1
+              </StatusPill>
+            </div>
+
+            <div className="relative mt-7 space-y-5">
+              <label className="block">
+                <span className={fieldLabelClassName}>Product name</span>
+                <input
+                  value={productName}
+                  onChange={(event) => {
+                    const nextProductName = event.target.value;
+
+                    setProductName(nextProductName);
+
+                    if (productNameError) {
+                      setProductNameError(getProductNameError(nextProductName));
+                    }
+                  }}
+                  placeholder="Ví dụ: Máy xay sinh tố mini"
+                  aria-describedby={
+                    productNameError ? "image-product-name-error" : undefined
+                  }
+                  aria-invalid={Boolean(productNameError)}
+                  className={`${formControlClassName} placeholder:text-zinc-600`}
+                />
+                {productNameError ? (
+                  <p
+                    id="image-product-name-error"
+                    className="mt-2 text-xs font-bold leading-5 text-red-200"
+                  >
+                    {productNameError}
+                  </p>
+                ) : null}
+              </label>
+
+              <div className="grid gap-5 sm:grid-cols-2">
+                <label className="block">
+                  <span className={fieldLabelClassName}>Style</span>
+                  <select
+                    value={style}
+                    onChange={(event) =>
+                      setStyle(event.target.value as ImageStyle)
+                    }
+                    className={formControlClassName}
+                  >
+                    {imageStyles.map((item) => (
+                      <option key={item}>{item}</option>
+                    ))}
+                  </select>
+                </label>
+
+                <label className="block">
+                  <span className={fieldLabelClassName}>Platform</span>
+                  <select
+                    value={platform}
+                    onChange={(event) =>
+                      setPlatform(event.target.value as ImagePlatform)
+                    }
+                    className={formControlClassName}
+                  >
+                    {imagePlatforms.map((item) => (
+                      <option key={item}>{item}</option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+
+              <button
+                type="submit"
+                disabled={isLoading || !userId}
+                className="group relative inline-flex h-14 w-full items-center justify-center overflow-hidden rounded-lg bg-[linear-gradient(135deg,#fde68a_0%,#facc15_40%,#d97706_100%)] px-6 text-sm font-black text-black shadow-[0_20px_55px_rgba(250,204,21,0.24)] transition duration-500 ease-out hover:-translate-y-1 hover:shadow-[0_26px_80px_rgba(250,204,21,0.38)] focus:outline-none focus:ring-2 focus:ring-yellow-300/70 focus:ring-offset-2 focus:ring-offset-black disabled:cursor-not-allowed disabled:opacity-70 disabled:hover:translate-y-0"
+              >
+                <span className="absolute inset-y-0 -left-20 w-16 rotate-12 bg-white/35 blur-md transition duration-700 group-hover:left-[115%]" />
+                <span className="relative flex items-center gap-2 transition duration-500 group-hover:scale-[1.02]">
+                  {isLoading ? "Đang tạo ảnh..." : "Tạo ảnh bán hàng"}
+                  <span aria-hidden="true">-&gt;</span>
+                </span>
+              </button>
+
+              <div className="flex flex-col gap-3 text-xs font-bold leading-5 text-zinc-500 sm:flex-row sm:items-center sm:justify-between">
+                {userId ? (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <StatusPill className="border-yellow-300/25 bg-yellow-300/10 text-yellow-100">
+                      {getAccountPlanLabel(accountPlan)}
+                    </StatusPill>
+                    {dailyUsage ? (
+                      <p className="text-yellow-100">
+                        Còn {dailyUsage.remainingToday}/{dailyUsage.dailyLimit}{" "}
+                        ảnh hôm nay
+                      </p>
+                    ) : (
+                      <p>
+                        {usageErrorMessage ?? "Đang tải lượt ảnh còn lại..."}
+                      </p>
+                    )}
+                  </div>
+                ) : (
+                  <p>Đăng nhập để tạo ảnh và kiểm soát giới hạn chi phí.</p>
+                )}
+                {accountPlan === "free" ? (
+                  <button
+                    type="button"
+                    onClick={() => onUpgradeClick("generator_usage")}
+                    className="inline-flex h-10 items-center justify-center rounded-full border border-yellow-300/35 bg-yellow-300/10 px-4 text-xs font-black text-yellow-200 transition hover:border-yellow-300 hover:bg-yellow-300 hover:text-black focus:outline-none focus:ring-2 focus:ring-yellow-300/60"
+                  >
+                    Nâng cấp Pro
+                  </button>
+                ) : null}
+              </div>
+            </div>
+          </form>
+
+          <div className="relative overflow-hidden rounded-lg border border-yellow-300/18 bg-[linear-gradient(145deg,rgba(18,18,18,0.96),rgba(4,4,4,0.98)_58%,rgba(28,19,5,0.92))] p-6 shadow-[0_30px_110px_rgba(250,204,21,0.12)] md:p-7">
+            <div className="pointer-events-none absolute -left-24 -top-24 h-72 w-72 rounded-full bg-yellow-300/12 blur-3xl" />
+            <div className="pointer-events-none absolute inset-x-8 top-0 h-px bg-gradient-to-r from-transparent via-yellow-200 to-transparent" />
+
+            <div className="relative flex flex-col gap-4 border-b border-white/10 pb-5 sm:flex-row sm:items-center sm:justify-between">
+              <PanelTitle
+                title="Image output"
+                description="Visual thương mại điện tử"
+              />
+              <div className="flex flex-wrap gap-2">
+                <StatusPill className="border-white/10 bg-white text-black">
+                  {platform}
+                </StatusPill>
+                <StatusPill className="border-yellow-300/25 bg-yellow-300/10 text-yellow-100">
+                  {style}
+                </StatusPill>
+              </div>
+            </div>
+
+            <div aria-live="polite">
+              {errorMessage ? (
+                <div
+                  role="alert"
+                  className="relative mt-6 overflow-hidden rounded-lg border border-red-400/30 bg-red-500/[0.08] p-5"
+                >
+                  <p className="relative text-sm font-black text-red-200">
+                    Không tạo được ảnh
+                  </p>
+                  <p className="relative mt-2 text-sm leading-6 text-zinc-300">
+                    {errorMessage}
+                  </p>
+                </div>
+              ) : isLoading ? (
+                <ImageLoadingSkeleton />
+              ) : image ? (
+                <article className="relative mt-6 overflow-hidden rounded-lg border border-white/10 bg-white/[0.055] p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+                  <Image
+                    src={image.imageDataUrl}
+                    alt={`Ảnh bán hàng AI cho ${image.productName}`}
+                    width={1024}
+                    height={1024}
+                    unoptimized
+                    className="aspect-square w-full rounded-lg border border-white/10 object-cover"
+                  />
+                  <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                    <div>
+                      <p className="text-sm font-black text-white">
+                        {image.productName}
+                      </p>
+                      <p className="mt-1 text-xs font-semibold text-zinc-500">
+                        {image.platform} • {image.style}
+                      </p>
+                    </div>
+                    <a
+                      href={image.imageDataUrl}
+                      download={getImageDownloadName(image)}
+                      className="inline-flex h-11 items-center justify-center rounded-full border border-yellow-300/35 bg-yellow-300/10 px-5 text-xs font-black text-yellow-200 transition hover:border-yellow-300 hover:bg-yellow-300 hover:text-black focus:outline-none focus:ring-2 focus:ring-yellow-300/60"
+                    >
+                      Tải ảnh
+                    </a>
+                  </div>
+                </article>
+              ) : (
+                <div className="relative mt-6 overflow-hidden rounded-lg border border-dashed border-yellow-300/30 bg-yellow-300/[0.045] p-8 text-center">
+                  <p className="relative text-xl font-black text-white">
+                    Ảnh bán hàng sẽ xuất hiện ở đây.
+                  </p>
+                  <p className="relative mt-3 text-sm leading-6 text-zinc-400">
+                    Kết quả phù hợp cho banner sản phẩm, thumbnail video ngắn
+                    và visual quảng cáo đơn giản.
+                  </p>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function RecentHistorySection({
   generations,
   isLoading,
@@ -844,6 +1290,16 @@ function OutputLoadingSkeleton() {
   );
 }
 
+function ImageLoadingSkeleton() {
+  return (
+    <div className="relative mt-6 overflow-hidden rounded-lg border border-white/10 bg-white/[0.045] p-4">
+      <div className="aspect-square w-full animate-pulse rounded-lg bg-yellow-300/10" />
+      <div className="mt-5 h-3 w-44 animate-pulse rounded-full bg-yellow-300/30" />
+      <div className="mt-3 h-3 w-28 animate-pulse rounded-full bg-white/10" />
+    </div>
+  );
+}
+
 function OutputBlock({
   title,
   body,
@@ -920,6 +1376,12 @@ function getGenerateErrorMessage(data: GenerateResponse) {
     : "Không thể tạo nội dung. Vui lòng thử lại.";
 }
 
+function getGenerateImageErrorMessage(data: GenerateImageResponse) {
+  return "error" in data && data.error
+    ? data.error
+    : "Không thể tạo ảnh. Vui lòng thử lại.";
+}
+
 function formatGenerationTime(value: string | null) {
   if (!value) {
     return "Mới lưu";
@@ -958,6 +1420,22 @@ function normalizeAccountPlan(plan: string | null | undefined): AccountPlan {
 
 function getAccountPlanLabel(plan: AccountPlan) {
   return plan === "pro" ? "Gói Pro" : "Gói Free";
+}
+
+function getImageDailyLimit(plan: AccountPlan) {
+  return plan === "pro" ? PRO_IMAGE_DAILY_LIMIT : FREE_IMAGE_DAILY_LIMIT;
+}
+
+function getImageDownloadName(image: GeneratedImage) {
+  const slug = image.productName
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48);
+
+  return `${slug || "ai-product-image"}.jpg`;
 }
 
 function getGeneratorAnalyticsProperties({
@@ -1021,6 +1499,20 @@ function isGeneratedContent(
     ) &&
     typeof value.cta === "string" &&
     typeof value.description === "string"
+  );
+}
+
+function isGeneratedImage(value: GenerateImageResponse): value is GeneratedImage {
+  return (
+    "imageDataUrl" in value &&
+    "productName" in value &&
+    "style" in value &&
+    "platform" in value &&
+    typeof value.imageDataUrl === "string" &&
+    value.imageDataUrl.startsWith("data:image/") &&
+    typeof value.productName === "string" &&
+    imageStyles.includes(value.style as ImageStyle) &&
+    imagePlatforms.includes(value.platform as ImagePlatform)
   );
 }
 
@@ -1366,6 +1858,12 @@ export default function Home() {
       </section>
 
       <GeneratorDemoSection
+        supabase={supabase}
+        userId={userId}
+        onUpgradeClick={handleUpgradeClick}
+      />
+
+      <ImageGenerationSection
         supabase={supabase}
         userId={userId}
         onUpgradeClick={handleUpgradeClick}
