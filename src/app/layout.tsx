@@ -8,7 +8,25 @@ const inter = Inter({
   subsets: ["latin"],
 });
 
-const siteUrl = "https://ai-content-seller.example.com";
+function getSiteOrigin() {
+  const explicit = process.env.NEXT_PUBLIC_SITE_URL?.trim();
+
+  if (explicit) {
+    return explicit.replace(/\/$/, "");
+  }
+
+  const vercel = process.env.VERCEL_URL?.trim();
+
+  if (vercel) {
+    const host = vercel.replace(/^https?:\/\//, "");
+
+    return `https://${host}`;
+  }
+
+  return "http://localhost:3000";
+}
+
+const siteUrl = getSiteOrigin();
 const siteTitle =
   "AI Content Seller | AI viết content Shopee và TikTok Shop";
 const siteDescription =

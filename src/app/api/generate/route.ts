@@ -44,6 +44,24 @@ type UsageQuota = {
   remainingToday: number;
 };
 
+type ReserveQuotaResult =
+  | {
+      ok: true;
+      reservationId: string;
+      dailyLimit: number;
+      generationCountBefore: number;
+    }
+  | { ok: false; reason: "limit"; dailyLimit: number; usedToday: number }
+  | { ok: false; reason: "rpc_error"; message?: string };
+
+type ActiveGenerationQuota = {
+  userId: string;
+  supabase: NonNullable<Awaited<ReturnType<typeof getSupabaseClientOrNull>>>;
+  reservationId: string;
+  dailyLimit: number;
+  generationCountBefore: number;
+};
+
 type ValidatedGenerateInput =
   | {
       ok: true;
@@ -119,25 +137,49 @@ export async function POST(request: Request) {
     );
   }
 
-  const quotaResult = await getUsageQuota();
+  const authQuotaCtx = await resolveAuthenticatedGenerateContext();
 
-  if (!quotaResult.ok) {
+  if (!authQuotaCtx.ok) {
     return Response.json(
       { error: "Không kiểm tra được lượt sử dụng. Vui lòng thử lại sau." },
       { status: 500, headers: getRateLimitHeaders(rateLimit) },
     );
   }
 
-  const quota = quotaResult.quota;
+  let activeQuota: ActiveGenerationQuota | undefined;
 
-  if (quota && quota.usedToday >= quota.dailyLimit) {
-    return Response.json(
-      {
-        error: "Bạn đã dùng hết lượt miễn phí hôm nay.",
-        usage: getUsageResponse(quota),
-      },
-      { status: 429, headers: getRateLimitHeaders(rateLimit) },
-    );
+  if (authQuotaCtx.mode === "authenticated") {
+    const reserved = await reserveGenerationQuota(authQuotaCtx.supabase);
+
+    if (!reserved.ok) {
+      if (reserved.reason === "limit") {
+        return Response.json(
+          {
+            error: "Bạn đã dùng hết lượt miễn phí hôm nay.",
+            usage: getUsageResponse({
+              userId: authQuotaCtx.userId,
+              dailyLimit: reserved.dailyLimit,
+              usedToday: reserved.usedToday,
+              remainingToday: Math.max(reserved.dailyLimit - reserved.usedToday, 0),
+            }),
+          },
+          { status: 429, headers: getRateLimitHeaders(rateLimit) },
+        );
+      }
+
+      return Response.json(
+        { error: "Không kiểm tra được lượt sử dụng. Vui lòng thử lại sau." },
+        { status: 503, headers: getRateLimitHeaders(rateLimit) },
+      );
+    }
+
+    activeQuota = {
+      userId: authQuotaCtx.userId,
+      supabase: authQuotaCtx.supabase,
+      reservationId: reserved.reservationId,
+      dailyLimit: reserved.dailyLimit,
+      generationCountBefore: reserved.generationCountBefore,
+    };
   }
 
   try {
@@ -202,6 +244,8 @@ export async function POST(request: Request) {
     if (!openAIResponse.ok) {
       console.error("OpenAI API error", { status: openAIResponse.status });
 
+      await releaseGenerationReservationSafe(activeQuota);
+
       return Response.json(
         { error: "Không thể tạo nội dung lúc này. Vui lòng thử lại sau." },
         { status: 502, headers: getRateLimitHeaders(rateLimit) },
@@ -214,6 +258,8 @@ export async function POST(request: Request) {
     if (!outputText) {
       console.error("OpenAI response missing output text");
 
+      await releaseGenerationReservationSafe(activeQuota);
+
       return Response.json(
         { error: "AI chưa trả về nội dung hợp lệ. Vui lòng thử lại." },
         { status: 502, headers: getRateLimitHeaders(rateLimit) },
@@ -225,22 +271,26 @@ export async function POST(request: Request) {
     if (!generatedContent) {
       console.error("OpenAI response did not match expected JSON");
 
+      await releaseGenerationReservationSafe(activeQuota);
+
       return Response.json(
         { error: "AI trả về định dạng không hợp lệ. Vui lòng thử lại." },
         { status: 502, headers: getRateLimitHeaders(rateLimit) },
       );
     }
 
-    let usage = quota ? getUsageResponse(quota) : undefined;
+    let usage: ReturnType<typeof getUsageResponse> | undefined;
 
-    if (quota) {
+    if (activeQuota) {
       const saved = await saveGeneration({
-        userId: quota.userId,
+        userId: activeQuota.userId,
         input,
         content: generatedContent,
       });
 
       if (!saved) {
+        await releaseGenerationReservationSafe(activeQuota);
+
         return Response.json(
           {
             error:
@@ -250,10 +300,15 @@ export async function POST(request: Request) {
         );
       }
 
+      await releaseGenerationReservationSafe(activeQuota);
+
+      const usedToday = activeQuota.generationCountBefore + 1;
+
       usage = getUsageResponse({
-        ...quota,
-        usedToday: quota.usedToday + 1,
-        remainingToday: Math.max(quota.dailyLimit - quota.usedToday - 1, 0),
+        userId: activeQuota.userId,
+        dailyLimit: activeQuota.dailyLimit,
+        usedToday,
+        remainingToday: Math.max(activeQuota.dailyLimit - usedToday, 0),
       });
     }
 
@@ -263,6 +318,8 @@ export async function POST(request: Request) {
   } catch (error) {
     console.error("Generate route error", getSafeErrorMessage(error));
 
+    await releaseGenerationReservationSafe(activeQuota);
+
     return Response.json(
       { error: "Không thể kết nối tới dịch vụ tạo nội dung." },
       { status: 502, headers: getRateLimitHeaders(rateLimit) },
@@ -270,13 +327,20 @@ export async function POST(request: Request) {
   }
 }
 
-async function getUsageQuota(): Promise<
-  { ok: true; quota: UsageQuota | null } | { ok: false }
+async function resolveAuthenticatedGenerateContext(): Promise<
+  | { ok: false }
+  | { ok: true; mode: "anonymous" }
+  | {
+      ok: true;
+      mode: "authenticated";
+      supabase: NonNullable<Awaited<ReturnType<typeof getSupabaseClientOrNull>>>;
+      userId: string;
+    }
 > {
   const supabase = await getSupabaseClientOrNull();
 
   if (!supabase) {
-    return { ok: true, quota: null };
+    return { ok: true, mode: "anonymous" };
   }
 
   const {
@@ -285,7 +349,7 @@ async function getUsageQuota(): Promise<
   } = await supabase.auth.getUser();
 
   if (userError || !user) {
-    return { ok: true, quota: null };
+    return { ok: true, mode: "anonymous" };
   }
 
   const profile = await getOrCreateProfile({
@@ -297,34 +361,77 @@ async function getUsageQuota(): Promise<
     return { ok: false };
   }
 
-  const dailyLimit =
-    typeof profile.daily_limit === "number" && profile.daily_limit > 0
-      ? profile.daily_limit
-      : DEFAULT_DAILY_LIMIT;
-  const todayRange = getVietnamTodayRange();
-  const { count, error } = await supabase
-    .from("generations")
-    .select("id", { count: "exact", head: true })
-    .eq("user_id", user.id)
-    .gte("created_at", todayRange.startIso)
-    .lt("created_at", todayRange.endIso);
+  return { ok: true, mode: "authenticated", supabase, userId: user.id };
+}
+
+async function reserveGenerationQuota(
+  supabase: NonNullable<Awaited<ReturnType<typeof getSupabaseClientOrNull>>>,
+): Promise<ReserveQuotaResult> {
+  const { data, error } = await supabase.rpc("reserve_generation_quota");
 
   if (error) {
-    console.error("Supabase generations count error", error.message);
-    return { ok: false };
+    console.error("reserve_generation_quota RPC error", error.message);
+
+    return { ok: false, reason: "rpc_error", message: error.message };
   }
 
-  const usedToday = count ?? 0;
+  const payload = data as unknown;
+
+  if (!isRecord(payload) || typeof payload.ok !== "boolean") {
+    return { ok: false, reason: "rpc_error" };
+  }
+
+  if (!payload.ok) {
+    if (payload.reason === "limit") {
+      const dailyLimit =
+        typeof payload.daily_limit === "number" && payload.daily_limit > 0
+          ? payload.daily_limit
+          : DEFAULT_DAILY_LIMIT;
+      const usedToday =
+        typeof payload.used_today === "number" ? payload.used_today : dailyLimit;
+
+      return { ok: false, reason: "limit", dailyLimit, usedToday };
+    }
+
+    return { ok: false, reason: "rpc_error" };
+  }
+
+  const reservationId =
+    typeof payload.reservation_id === "string" ? payload.reservation_id : null;
+
+  if (!reservationId) {
+    return { ok: false, reason: "rpc_error" };
+  }
+
+  const dailyLimit =
+    typeof payload.daily_limit === "number" && payload.daily_limit > 0
+      ? payload.daily_limit
+      : DEFAULT_DAILY_LIMIT;
+  const generationCountBefore =
+    typeof payload.generation_count_before === "number"
+      ? payload.generation_count_before
+      : 0;
 
   return {
     ok: true,
-    quota: {
-      userId: user.id,
-      dailyLimit,
-      usedToday,
-      remainingToday: Math.max(dailyLimit - usedToday, 0),
-    },
+    reservationId,
+    dailyLimit,
+    generationCountBefore,
   };
+}
+
+async function releaseGenerationReservationSafe(activeQuota: ActiveGenerationQuota | undefined) {
+  if (!activeQuota) {
+    return;
+  }
+
+  const { error } = await activeQuota.supabase.rpc("release_generation_reservation", {
+    p_reservation_id: activeQuota.reservationId,
+  });
+
+  if (error) {
+    console.error("release_generation_reservation RPC error", error.message);
+  }
 }
 
 async function getSupabaseClientOrNull() {
@@ -429,19 +536,6 @@ function getUsageResponse(quota: UsageQuota) {
     dailyLimit: quota.dailyLimit,
     usedToday: quota.usedToday,
     remainingToday: quota.remainingToday,
-  };
-}
-
-function getVietnamTodayRange() {
-  const vietnamOffsetMs = 7 * 60 * 60 * 1000;
-  const dayMs = 24 * 60 * 60 * 1000;
-  const now = Date.now();
-  const startMs = Math.floor((now + vietnamOffsetMs) / dayMs) * dayMs -
-    vietnamOffsetMs;
-
-  return {
-    startIso: new Date(startMs).toISOString(),
-    endIso: new Date(startMs + dayMs).toISOString(),
   };
 }
 
