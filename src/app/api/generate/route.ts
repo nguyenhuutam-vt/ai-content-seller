@@ -1,9 +1,12 @@
 import { createHmac, randomUUID, timingSafeEqual } from "crypto";
 
+import { createClient as createSupabaseServerClient } from "@/lib/supabase/server";
+
 export const runtime = "nodejs";
 
 const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
 const OPENAI_MODEL = "gpt-5.4-nano";
+const DEFAULT_DAILY_LIMIT = 10;
 const MIN_PRODUCT_NAME_LENGTH = 3;
 const MAX_PRODUCT_NAME_LENGTH = 120;
 const MAX_OUTPUT_TOKENS = 380;
@@ -25,6 +28,20 @@ type GeneratedContent = {
   hashtags: string[];
   cta: string;
   description: string;
+};
+
+type UserProfile = {
+  id: string;
+  email: string | null;
+  plan: string | null;
+  daily_limit: number | null;
+};
+
+type UsageQuota = {
+  userId: string;
+  dailyLimit: number;
+  usedToday: number;
+  remainingToday: number;
 };
 
 type ValidatedGenerateInput =
@@ -99,6 +116,27 @@ export async function POST(request: Request) {
     return Response.json(
       { error: "Server chưa sẵn sàng tạo nội dung. Vui lòng thử lại sau." },
       { status: 500, headers: getRateLimitHeaders(rateLimit) },
+    );
+  }
+
+  const quotaResult = await getUsageQuota();
+
+  if (!quotaResult.ok) {
+    return Response.json(
+      { error: "Không kiểm tra được lượt sử dụng. Vui lòng thử lại sau." },
+      { status: 500, headers: getRateLimitHeaders(rateLimit) },
+    );
+  }
+
+  const quota = quotaResult.quota;
+
+  if (quota && quota.usedToday >= quota.dailyLimit) {
+    return Response.json(
+      {
+        error: "Bạn đã dùng hết lượt miễn phí hôm nay.",
+        usage: getUsageResponse(quota),
+      },
+      { status: 429, headers: getRateLimitHeaders(rateLimit) },
     );
   }
 
@@ -193,7 +231,33 @@ export async function POST(request: Request) {
       );
     }
 
-    return Response.json(generatedContent, {
+    let usage = quota ? getUsageResponse(quota) : undefined;
+
+    if (quota) {
+      const saved = await saveGeneration({
+        userId: quota.userId,
+        input,
+        content: generatedContent,
+      });
+
+      if (!saved) {
+        return Response.json(
+          {
+            error:
+              "Nội dung đã tạo xong nhưng chưa lưu được vào lịch sử. Vui lòng thử lại.",
+          },
+          { status: 502, headers: getRateLimitHeaders(rateLimit) },
+        );
+      }
+
+      usage = getUsageResponse({
+        ...quota,
+        usedToday: quota.usedToday + 1,
+        remainingToday: Math.max(quota.dailyLimit - quota.usedToday - 1, 0),
+      });
+    }
+
+    return Response.json({ ...generatedContent, usage }, {
       headers: getRateLimitHeaders(rateLimit),
     });
   } catch (error) {
@@ -204,6 +268,181 @@ export async function POST(request: Request) {
       { status: 502, headers: getRateLimitHeaders(rateLimit) },
     );
   }
+}
+
+async function getUsageQuota(): Promise<
+  { ok: true; quota: UsageQuota | null } | { ok: false }
+> {
+  const supabase = await getSupabaseClientOrNull();
+
+  if (!supabase) {
+    return { ok: true, quota: null };
+  }
+
+  const {
+    data: { user },
+    error: userError,
+  } = await supabase.auth.getUser();
+
+  if (userError || !user) {
+    return { ok: true, quota: null };
+  }
+
+  const profile = await getOrCreateProfile({
+    userId: user.id,
+    email: user.email ?? null,
+  });
+
+  if (!profile) {
+    return { ok: false };
+  }
+
+  const dailyLimit =
+    typeof profile.daily_limit === "number" && profile.daily_limit > 0
+      ? profile.daily_limit
+      : DEFAULT_DAILY_LIMIT;
+  const todayRange = getVietnamTodayRange();
+  const { count, error } = await supabase
+    .from("generations")
+    .select("id", { count: "exact", head: true })
+    .eq("user_id", user.id)
+    .gte("created_at", todayRange.startIso)
+    .lt("created_at", todayRange.endIso);
+
+  if (error) {
+    console.error("Supabase generations count error", error.message);
+    return { ok: false };
+  }
+
+  const usedToday = count ?? 0;
+
+  return {
+    ok: true,
+    quota: {
+      userId: user.id,
+      dailyLimit,
+      usedToday,
+      remainingToday: Math.max(dailyLimit - usedToday, 0),
+    },
+  };
+}
+
+async function getSupabaseClientOrNull() {
+  try {
+    return await createSupabaseServerClient();
+  } catch (error) {
+    console.error(
+      "Supabase server client unavailable",
+      getSafeErrorMessage(error),
+    );
+    return null;
+  }
+}
+
+async function getOrCreateProfile({
+  userId,
+  email,
+}: {
+  userId: string;
+  email: string | null;
+}) {
+  const supabase = await getSupabaseClientOrNull();
+
+  if (!supabase) {
+    return null;
+  }
+
+  const { data, error } = await supabase
+    .from("profiles")
+    .select("id, email, plan, daily_limit")
+    .eq("id", userId)
+    .maybeSingle()
+    .returns<UserProfile | null>();
+
+  if (error) {
+    console.error("Supabase profile select error", error.message);
+    return null;
+  }
+
+  if (data) {
+    return data;
+  }
+
+  const fallbackProfile: UserProfile = {
+    id: userId,
+    email,
+    plan: "free",
+    daily_limit: DEFAULT_DAILY_LIMIT,
+  };
+
+  const { data: insertedProfile, error: insertError } = await supabase
+    .from("profiles")
+    .insert(fallbackProfile)
+    .select("id, email, plan, daily_limit")
+    .single()
+    .returns<UserProfile>();
+
+  if (insertError) {
+    console.error("Supabase profile insert error", insertError.message);
+    return fallbackProfile;
+  }
+
+  return insertedProfile;
+}
+
+async function saveGeneration({
+  userId,
+  input,
+  content,
+}: {
+  userId: string;
+  input: Extract<ValidatedGenerateInput, { ok: true }>;
+  content: GeneratedContent;
+}) {
+  const supabase = await getSupabaseClientOrNull();
+
+  if (!supabase) {
+    return false;
+  }
+
+  const { error } = await supabase.from("generations").insert({
+    user_id: userId,
+    product_name: input.productName,
+    platform: input.platform,
+    tone: input.tone,
+    caption: content.caption,
+    hashtags: content.hashtags,
+    cta: content.cta,
+    description: content.description,
+  });
+
+  if (error) {
+    console.error("Supabase generation insert error", error.message);
+    return false;
+  }
+
+  return true;
+}
+
+function getUsageResponse(quota: UsageQuota) {
+  return {
+    dailyLimit: quota.dailyLimit,
+    usedToday: quota.usedToday,
+    remainingToday: quota.remainingToday,
+  };
+}
+
+function getVietnamTodayRange() {
+  const vietnamOffsetMs = 7 * 60 * 60 * 1000;
+  const dayMs = 24 * 60 * 60 * 1000;
+  const now = Date.now();
+  const startMs = Math.floor((now + vietnamOffsetMs) / dayMs) * dayMs -
+    vietnamOffsetMs;
+
+  return {
+    startIso: new Date(startMs).toISOString(),
+    endIso: new Date(startMs + dayMs).toISOString(),
+  };
 }
 
 function validateGenerateInput(body: unknown): ValidatedGenerateInput {
