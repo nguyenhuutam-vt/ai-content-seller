@@ -2786,6 +2786,9 @@ export default function Home() {
   const [isAuthLoading, setIsAuthLoading] = useState(false);
   const [isUpgradeOpen, setIsUpgradeOpen] = useState(false);
   const [generatorTab, setGeneratorTab] = useState<GeneratorTab>("content");
+  const [activatedTabs, setActivatedTabs] = useState<Set<GeneratorTab>>(
+    () => new Set<GeneratorTab>(["content"]),
+  );
 
   useEffect(() => {
     if (!supabase) {
@@ -3125,7 +3128,15 @@ export default function Home() {
                   type="button"
                   role="tab"
                   aria-selected={generatorTab === tab.id}
-                  onClick={() => setGeneratorTab(tab.id)}
+                  onClick={() => {
+                    setGeneratorTab(tab.id);
+                    setActivatedTabs((prev) => {
+                      if (prev.has(tab.id)) return prev;
+                      const next = new Set(prev);
+                      next.add(tab.id);
+                      return next;
+                    });
+                  }}
                   className={`shrink-0 rounded-lg border px-4 py-2 text-xs font-black transition duration-200 focus:outline-none focus:ring-2 focus:ring-yellow-300/60 ${
                     generatorTab === tab.id
                       ? "border-yellow-300/40 bg-yellow-300/10 text-yellow-100 shadow-[0_0_20px_rgba(250,204,21,0.10)]"
@@ -3151,41 +3162,47 @@ export default function Home() {
           />
         </div>
 
-        <div
-          role="tabpanel"
-          className={generatorTab !== "image" ? "hidden" : ""}
-          aria-hidden={generatorTab !== "image"}
-        >
-          <ImageGenerationSection
-            supabase={supabase}
-            userId={userId}
-            onUpgradeClick={handleUpgradeClick}
-          />
-        </div>
+        {activatedTabs.has("image") && (
+          <div
+            role="tabpanel"
+            className={generatorTab !== "image" ? "hidden" : ""}
+            aria-hidden={generatorTab !== "image"}
+          >
+            <ImageGenerationSection
+              supabase={supabase}
+              userId={userId}
+              onUpgradeClick={handleUpgradeClick}
+            />
+          </div>
+        )}
 
-        <div
-          role="tabpanel"
-          className={generatorTab !== "video-script" ? "hidden" : ""}
-          aria-hidden={generatorTab !== "video-script"}
-        >
-          <VideoScriptSection
-            supabase={supabase}
-            userId={userId}
-            onUpgradeClick={handleUpgradeClick}
-          />
-        </div>
+        {activatedTabs.has("video-script") && (
+          <div
+            role="tabpanel"
+            className={generatorTab !== "video-script" ? "hidden" : ""}
+            aria-hidden={generatorTab !== "video-script"}
+          >
+            <VideoScriptSection
+              supabase={supabase}
+              userId={userId}
+              onUpgradeClick={handleUpgradeClick}
+            />
+          </div>
+        )}
 
-        <div
-          role="tabpanel"
-          className={generatorTab !== "tiktok-hooks" ? "hidden" : ""}
-          aria-hidden={generatorTab !== "tiktok-hooks"}
-        >
-          <TikTokHooksSection
-            supabase={supabase}
-            userId={userId}
-            onUpgradeClick={handleUpgradeClick}
-          />
-        </div>
+        {activatedTabs.has("tiktok-hooks") && (
+          <div
+            role="tabpanel"
+            className={generatorTab !== "tiktok-hooks" ? "hidden" : ""}
+            aria-hidden={generatorTab !== "tiktok-hooks"}
+          >
+            <TikTokHooksSection
+              supabase={supabase}
+              userId={userId}
+              onUpgradeClick={handleUpgradeClick}
+            />
+          </div>
+        )}
       </div>
 
       <section
