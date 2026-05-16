@@ -99,13 +99,46 @@ const navLinks = [
   { href: "#features", label: "Tính năng" },
   { href: "#pricing", label: "Bảng giá" },
   { href: "#demo", label: "Demo" },
-  { href: "#generator", label: "Generator" },
-  { href: "#image-generator", label: "Ảnh AI" },
+  { href: "#generators", label: "Generator" },
 ] as const;
+
+type GeneratorTab = "content" | "image" | "video-script" | "tiktok-hooks";
+
+const generatorTabs: { id: GeneratorTab; label: string }[] = [
+  { id: "content", label: "Content" },
+  { id: "image", label: "Ảnh AI" },
+  { id: "video-script", label: "Video Script" },
+  { id: "tiktok-hooks", label: "TikTok Hooks" },
+];
 
 const platforms = ["Shopee", "TikTok Shop", "Facebook"] as const;
 const tones = ["Chuyên nghiệp", "Gen Z", "Sang trọng", "Viral"] as const;
 const imagePlatforms = ["Shopee", "TikTok Shop"] as const;
+const videoScriptPlatforms = ["TikTok Shop", "Shopee", "Facebook Reels"] as const;
+const videoScriptTones = ["Gen Z", "Chuyên nghiệp", "Viral", "Sang trọng"] as const;
+const videoScriptDurations = ["15 giây", "30 giây", "45 giây"] as const;
+const FREE_VIDEO_SCRIPT_DAILY_LIMIT = 5;
+const PRO_VIDEO_SCRIPT_DAILY_LIMIT = 50;
+const hookCategories = [
+  "Mỹ phẩm",
+  "Thời trang",
+  "Đồ gia dụng",
+  "Mẹ & bé",
+  "Đồ công nghệ",
+  "Khác",
+] as const;
+const hookTargetCustomers = [
+  "Học sinh / sinh viên",
+  "Dân văn phòng",
+  "Mẹ bỉm",
+  "Nam giới",
+  "Nữ giới",
+  "Chủ shop",
+] as const;
+const hookTones = ["Gen Z", "Viral", "Chuyên nghiệp", "Hài hước"] as const;
+const FREE_HOOKS_DAILY_LIMIT = 10;
+const PRO_HOOKS_DAILY_LIMIT = 100;
+const MAX_CUSTOMER_PAIN_LENGTH = 160;
 const imageStyles = [
   "Shopee banner",
   "TikTok thumbnail",
@@ -148,6 +181,12 @@ type Platform = (typeof platforms)[number];
 type Tone = (typeof tones)[number];
 type ImagePlatform = (typeof imagePlatforms)[number];
 type ImageStyle = (typeof imageStyles)[number];
+type VideoScriptPlatform = (typeof videoScriptPlatforms)[number];
+type VideoScriptTone = (typeof videoScriptTones)[number];
+type VideoScriptDuration = (typeof videoScriptDurations)[number];
+type HookCategory = (typeof hookCategories)[number];
+type HookTargetCustomer = (typeof hookTargetCustomers)[number];
+type HookTone = (typeof hookTones)[number];
 type Feature = (typeof features)[number];
 type Plan = (typeof plans)[number];
 type AuthMode = "login" | "signup";
@@ -160,6 +199,12 @@ type AnalyticsEventName =
   | "image_generate_clicked"
   | "image_generation_success"
   | "image_generation_failed"
+  | "video_script_generate_clicked"
+  | "video_script_generation_success"
+  | "video_script_generation_failed"
+  | "hooks_generate_clicked"
+  | "hooks_generation_success"
+  | "hooks_generation_failed"
   | "upgrade_clicked";
 type AnalyticsEventProperties = Record<
   string,
@@ -215,6 +260,41 @@ type GeneratedImage = {
 
 type GenerateImageResponse =
   | GeneratedImage
+  | { error?: string; usage?: DailyUsage };
+
+type VideoScene = {
+  time: string;
+  visual: string;
+  voiceover: string;
+  overlayText: string;
+};
+
+type GeneratedVideoScript = {
+  hook: string;
+  scenes: VideoScene[];
+  cta: string;
+  caption: string;
+  hashtags: string[];
+};
+
+type GenerateVideoScriptResponse =
+  | GeneratedVideoScript
+  | { error?: string; usage?: DailyUsage };
+
+type HookItem = {
+  hook: string;
+  angle: string;
+  overlayText: string;
+};
+
+type GeneratedHooks = {
+  hooks: HookItem[];
+  caption: string;
+  hashtags: string[];
+};
+
+type GenerateHooksResponse =
+  | GeneratedHooks
   | { error?: string; usage?: DailyUsage };
 
 function GeneratorDemoSection({
@@ -1130,6 +1210,572 @@ function ImageGenerationSection({
   );
 }
 
+function VideoScriptSection({
+  supabase,
+  userId,
+  onUpgradeClick,
+}: {
+  supabase: SupabaseBrowserClient | null;
+  userId: string | null;
+  onUpgradeClick: (source: UpgradeSource) => void;
+}) {
+  const [productName, setProductName] = useState("Túi đeo chéo mini chống nước");
+  const [platform, setPlatform] = useState<VideoScriptPlatform>("TikTok Shop");
+  const [tone, setTone] = useState<VideoScriptTone>("Gen Z");
+  const [duration, setDuration] = useState<VideoScriptDuration>("30 giây");
+  const [isLoading, setIsLoading] = useState(false);
+  const [script, setScript] = useState<GeneratedVideoScript | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [productNameError, setProductNameError] = useState<string | null>(null);
+  const [accountPlan, setAccountPlan] = useState<AccountPlan>("free");
+  const [dailyUsage, setDailyUsage] = useState<DailyUsage | null>(null);
+  const isMountedRef = useRef(true);
+
+  useEffect(() => {
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
+
+  const fetchVideoScriptUsage = useCallback(async () => {
+    if (!supabase || !userId) {
+      if (isMountedRef.current) {
+        setDailyUsage(null);
+        setAccountPlan("free");
+      }
+      return;
+    }
+
+    const todayRange = getVietnamTodayRange();
+    const { data: profile } = await supabase
+      .from("profiles")
+      .select("plan")
+      .eq("id", userId)
+      .maybeSingle()
+      .returns<{ plan: string | null } | null>();
+
+    if (!isMountedRef.current) return;
+
+    const { count } = await supabase
+      .from("video_scripts")
+      .select("id", { count: "exact", head: true })
+      .eq("user_id", userId)
+      .gte("created_at", todayRange.startIso)
+      .lt("created_at", todayRange.endIso);
+
+    if (!isMountedRef.current) return;
+
+    const nextPlan = normalizeAccountPlan(profile?.plan);
+    const limit =
+      nextPlan === "pro" ? PRO_VIDEO_SCRIPT_DAILY_LIMIT : FREE_VIDEO_SCRIPT_DAILY_LIMIT;
+    const usedToday = count ?? 0;
+
+    setAccountPlan(nextPlan);
+    setDailyUsage({
+      dailyLimit: limit,
+      usedToday,
+      remainingToday: Math.max(limit - usedToday, 0),
+    });
+  }, [supabase, userId]);
+
+  useEffect(() => {
+    void Promise.resolve().then(fetchVideoScriptUsage);
+  }, [fetchVideoScriptUsage]);
+
+  async function handleGenerate(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    if (isLoading) return;
+
+    const nextProductNameError = getProductNameError(productName);
+    trackAnalyticsEvent("video_script_generate_clicked", {
+      platform,
+      tone,
+      duration,
+      plan: accountPlan,
+      authenticated: Boolean(userId),
+    });
+
+    if (nextProductNameError) {
+      setScript(null);
+      setErrorMessage(null);
+      setProductNameError(nextProductNameError);
+      return;
+    }
+
+    setIsLoading(true);
+    setScript(null);
+    setErrorMessage(null);
+    setProductNameError(null);
+
+    try {
+      const response = await fetch("/api/generate-video-script", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          productName: productName.trim(),
+          platform,
+          tone,
+          duration,
+        }),
+      });
+      const data = (await response.json()) as GenerateVideoScriptResponse;
+
+      if (!response.ok) {
+        if ("usage" in data && data.usage) {
+          setDailyUsage(data.usage);
+        }
+        throw new Error(
+          "error" in data && data.error
+            ? data.error
+            : "Không thể tạo kịch bản. Vui lòng thử lại.",
+        );
+      }
+
+      if (!isGeneratedVideoScript(data)) {
+        throw new Error("API trả về định dạng không hợp lệ.");
+      }
+
+      setScript(data);
+      trackAnalyticsEvent("video_script_generation_success", {
+        platform,
+        tone,
+        duration,
+        plan: accountPlan,
+        authenticated: Boolean(userId),
+      });
+      void fetchVideoScriptUsage();
+    } catch (error) {
+      trackAnalyticsEvent("video_script_generation_failed", {
+        platform,
+        tone,
+        duration,
+        plan: accountPlan,
+        authenticated: Boolean(userId),
+      });
+      setErrorMessage(
+        error instanceof Error
+          ? error.message
+          : "Không thể tạo kịch bản. Vui lòng thử lại.",
+      );
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
+  return (
+    <section
+      id="video-script"
+      aria-labelledby="video-script-title"
+      className="relative isolate overflow-hidden border-b border-yellow-300/10 bg-[#060606]"
+    >
+      <div className="absolute inset-0 -z-10 bg-[radial-gradient(circle_at_80%_10%,rgba(250,204,21,0.14),transparent_30%),linear-gradient(180deg,#070707_0%,#020202_100%)]" />
+      <div className="absolute inset-0 -z-10 opacity-[0.14] [background-image:linear-gradient(rgba(250,204,21,0.2)_1px,transparent_1px),linear-gradient(90deg,rgba(250,204,21,0.14)_1px,transparent_1px)] [background-size:80px_80px] [mask-image:radial-gradient(circle_at_80%_20%,black,transparent_65%)]" />
+      <div className="absolute left-1/2 top-0 -z-10 h-px w-[72rem] -translate-x-1/2 bg-gradient-to-r from-transparent via-yellow-200/60 to-transparent" />
+
+      <div className="relative mx-auto max-w-7xl px-6 py-16 md:py-24">
+        <div className="grid gap-6 md:grid-cols-[0.9fr_1.1fr] md:items-end">
+          <div>
+            <p className="inline-flex rounded-lg border border-yellow-300/25 bg-yellow-300/10 px-3 py-2 text-xs font-extrabold uppercase text-yellow-100">
+              AI viết kịch bản video bán hàng
+            </p>
+            <h2
+              id="video-script-title"
+              className="mt-6 max-w-3xl text-4xl font-black leading-[1.05] text-white md:text-5xl"
+            >
+              Kịch bản video TikTok Shop và Shopee trong vài giây.
+            </h2>
+          </div>
+          <p className="text-base font-semibold leading-8 text-zinc-400">
+            Nhập sản phẩm, chọn kênh, tone và thời lượng. AI tự tạo hook, từng
+            cảnh quay, lời thoại và CTA hoàn chỉnh cho seller tự quay.
+          </p>
+        </div>
+
+        <div className="mt-10 grid gap-6 lg:grid-cols-[0.9fr_1.1fr]">
+          <form
+            onSubmit={handleGenerate}
+            aria-label="Tạo kịch bản video bán hàng bằng AI"
+            className="relative overflow-hidden rounded-lg border border-white/10 bg-[linear-gradient(145deg,rgba(22,22,22,0.96),rgba(5,5,5,0.96))] p-6 shadow-[0_30px_90px_rgba(0,0,0,0.52)] md:p-7"
+          >
+            <div className="pointer-events-none absolute -right-24 -top-24 h-56 w-56 rounded-full bg-yellow-300/10 blur-3xl" />
+            <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-yellow-200/70 to-transparent" />
+
+            <div className="relative flex items-center justify-between gap-4 border-b border-white/10 pb-5">
+              <PanelTitle title="Video brief" description="Hook + cảnh + CTA" />
+              <StatusPill className="border-yellow-300/25 bg-yellow-300/10 text-yellow-100">
+                {duration}
+              </StatusPill>
+            </div>
+
+            <div className="relative mt-7 space-y-5">
+              <label className="block">
+                <span className={fieldLabelClassName}>Product name</span>
+                <input
+                  value={productName}
+                  onChange={(event) => {
+                    const next = event.target.value;
+                    setProductName(next);
+                    if (productNameError) {
+                      setProductNameError(getProductNameError(next));
+                    }
+                  }}
+                  placeholder="Ví dụ: Serum dưỡng trắng da ban đêm"
+                  aria-describedby={
+                    productNameError ? "vs-product-name-error" : undefined
+                  }
+                  aria-invalid={Boolean(productNameError)}
+                  className={`${formControlClassName} placeholder:text-zinc-600`}
+                />
+                {productNameError ? (
+                  <p
+                    id="vs-product-name-error"
+                    className="mt-2 text-xs font-bold leading-5 text-red-200"
+                  >
+                    {productNameError}
+                  </p>
+                ) : null}
+              </label>
+
+              <div className="grid gap-5 sm:grid-cols-2">
+                <label className="block">
+                  <span className={fieldLabelClassName}>Platform</span>
+                  <select
+                    value={platform}
+                    onChange={(event) =>
+                      setPlatform(event.target.value as VideoScriptPlatform)
+                    }
+                    className={formControlClassName}
+                  >
+                    {videoScriptPlatforms.map((item) => (
+                      <option key={item}>{item}</option>
+                    ))}
+                  </select>
+                </label>
+
+                <label className="block">
+                  <span className={fieldLabelClassName}>Tone</span>
+                  <select
+                    value={tone}
+                    onChange={(event) =>
+                      setTone(event.target.value as VideoScriptTone)
+                    }
+                    className={formControlClassName}
+                  >
+                    {videoScriptTones.map((item) => (
+                      <option key={item}>{item}</option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+
+              <label className="block">
+                <span className={fieldLabelClassName}>Thời lượng video</span>
+                <select
+                  value={duration}
+                  onChange={(event) =>
+                    setDuration(event.target.value as VideoScriptDuration)
+                  }
+                  className={formControlClassName}
+                >
+                  {videoScriptDurations.map((item) => (
+                    <option key={item}>{item}</option>
+                  ))}
+                </select>
+              </label>
+
+              <button
+                type="submit"
+                disabled={isLoading}
+                className="group relative inline-flex h-14 w-full items-center justify-center overflow-hidden rounded-lg bg-[linear-gradient(135deg,#fde68a_0%,#facc15_40%,#d97706_100%)] px-6 text-sm font-black text-black shadow-[0_20px_55px_rgba(250,204,21,0.24)] transition duration-500 ease-out hover:-translate-y-1 hover:shadow-[0_26px_80px_rgba(250,204,21,0.38)] disabled:cursor-not-allowed disabled:opacity-70 disabled:hover:translate-y-0"
+              >
+                <span className="absolute inset-y-0 -left-20 w-16 rotate-12 bg-white/35 blur-md transition duration-700 group-hover:left-[115%]" />
+                <span className="relative flex items-center gap-2 transition duration-500 group-hover:scale-[1.02]">
+                  {isLoading ? "Đang tạo kịch bản..." : "Tạo kịch bản video"}
+                  <span aria-hidden="true">-&gt;</span>
+                </span>
+              </button>
+
+              <div className="flex flex-col gap-3 text-xs font-bold leading-5 text-zinc-500 sm:flex-row sm:items-center sm:justify-between">
+                {userId ? (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <StatusPill className="border-yellow-300/25 bg-yellow-300/10 text-yellow-100">
+                      {getAccountPlanLabel(accountPlan)}
+                    </StatusPill>
+                    {dailyUsage ? (
+                      <p className="text-yellow-100">
+                        Kịch bản video: còn {dailyUsage.remainingToday}/
+                        {dailyUsage.dailyLimit} lượt hôm nay
+                      </p>
+                    ) : (
+                      <p>Đang tải lượt còn lại...</p>
+                    )}
+                  </div>
+                ) : (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <StatusPill className="border-white/10 bg-white/[0.04] text-zinc-300">
+                      Gói Free
+                    </StatusPill>
+                    <p>Khách vẫn dùng được {FREE_VIDEO_SCRIPT_DAILY_LIMIT} kịch bản/ngày.</p>
+                  </div>
+                )}
+                {accountPlan === "free" ? (
+                  <button
+                    type="button"
+                    onClick={() => onUpgradeClick("generator_usage")}
+                    className="inline-flex h-10 items-center justify-center rounded-full border border-yellow-300/35 bg-yellow-300/10 px-4 text-xs font-black text-yellow-200 transition hover:border-yellow-300 hover:bg-yellow-300 hover:text-black focus:outline-none focus:ring-2 focus:ring-yellow-300/60"
+                  >
+                    Nâng cấp Pro
+                  </button>
+                ) : null}
+              </div>
+            </div>
+          </form>
+
+          <div className="relative overflow-hidden rounded-lg border border-yellow-300/18 bg-[linear-gradient(145deg,rgba(18,18,18,0.96),rgba(4,4,4,0.98)_58%,rgba(28,19,5,0.92))] p-6 shadow-[0_30px_110px_rgba(250,204,21,0.12)] md:p-7">
+            <div className="pointer-events-none absolute -left-24 -top-24 h-72 w-72 rounded-full bg-yellow-300/12 blur-3xl" />
+            <div className="pointer-events-none absolute inset-x-8 top-0 h-px bg-gradient-to-r from-transparent via-yellow-200 to-transparent" />
+
+            <div className="relative flex flex-col gap-4 border-b border-white/10 pb-5 sm:flex-row sm:items-center sm:justify-between">
+              <PanelTitle
+                title="Video script output"
+                description="Hook, cảnh, CTA, caption"
+              />
+              <div className="flex flex-wrap gap-2">
+                <StatusPill className="border-white/10 bg-white text-black">
+                  {platform}
+                </StatusPill>
+                <StatusPill className="border-yellow-300/25 bg-yellow-300/10 text-yellow-100">
+                  {tone}
+                </StatusPill>
+              </div>
+            </div>
+
+            <div aria-live="polite">
+              {errorMessage ? (
+                <div
+                  role="alert"
+                  className="relative mt-6 overflow-hidden rounded-lg border border-red-400/30 bg-red-500/[0.08] p-5 shadow-[inset_0_1px_0_rgba(248,113,113,0.18)]"
+                >
+                  <div className="absolute -right-16 -top-16 h-40 w-40 rounded-full bg-red-400/10 blur-3xl" />
+                  <p className="relative text-sm font-black text-red-200">
+                    Không tạo được kịch bản
+                  </p>
+                  <p className="relative mt-2 text-sm leading-6 text-zinc-300">
+                    {errorMessage}
+                  </p>
+                </div>
+              ) : isLoading ? (
+                <VideoScriptLoadingSkeleton />
+              ) : script ? (
+                <VideoScriptOutput script={script} />
+              ) : (
+                <div className="relative mt-6 overflow-hidden rounded-lg border border-dashed border-yellow-300/30 bg-yellow-300/[0.045] p-8 text-center shadow-[inset_0_1px_0_rgba(250,204,21,0.18)]">
+                  <div className="absolute left-1/2 top-0 h-24 w-64 -translate-x-1/2 rounded-full bg-yellow-300/10 blur-3xl" />
+                  <p className="relative text-xl font-black text-white">
+                    Kịch bản video sẽ xuất hiện ở đây.
+                  </p>
+                  <p className="relative mt-3 text-sm leading-6 text-zinc-400">
+                    Hook, từng cảnh quay, lời thoại và CTA cho seller tự quay
+                    tại nhà.
+                  </p>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function VideoScriptOutput({ script }: { script: GeneratedVideoScript }) {
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
+
+  function copyToClipboard(text: string, key: string) {
+    void navigator.clipboard.writeText(text).then(() => {
+      setCopiedKey(key);
+      setTimeout(() => setCopiedKey(null), 1800);
+    });
+  }
+
+  return (
+    <div className="relative mt-6 space-y-4">
+      <article className="group relative overflow-hidden rounded-lg border border-yellow-200/70 bg-[linear-gradient(135deg,#fde68a_0%,#facc15_46%,#d97706_100%)] p-5 shadow-[0_26px_80px_rgba(250,204,21,0.26)]">
+        <div className="pointer-events-none absolute -right-20 -top-20 h-52 w-52 rounded-full bg-white/30 blur-3xl" />
+        <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-black/20" />
+        <div className="relative flex items-start justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-black text-xs font-black text-yellow-300 shadow-[0_12px_30px_rgba(0,0,0,0.2)]">
+              H
+            </span>
+            <p className="text-xs font-black uppercase text-black/65">Hook</p>
+          </div>
+          <button
+            type="button"
+            onClick={() => copyToClipboard(script.hook, "hook")}
+            className="rounded-lg bg-black/10 px-2.5 py-1 text-[11px] font-black text-black/70 transition hover:bg-black/20 focus:outline-none"
+            aria-label="Sao chép hook"
+          >
+            {copiedKey === "hook" ? "Đã chép" : "Chép"}
+          </button>
+        </div>
+        <p className="relative mt-4 text-sm font-semibold leading-7 text-black">
+          {script.hook}
+        </p>
+      </article>
+
+      <div className="overflow-hidden rounded-lg border border-white/10 bg-white/[0.055]">
+        <div className="flex items-center gap-3 border-b border-white/10 px-5 py-4">
+          <span className="flex h-8 w-8 items-center justify-center rounded-lg border border-yellow-300/25 bg-yellow-300/10 text-xs font-black text-yellow-200">
+            S
+          </span>
+          <p className="text-xs font-black uppercase text-yellow-200">Scenes</p>
+        </div>
+        <div className="divide-y divide-white/[0.06]">
+          {script.scenes.map((scene, index) => (
+            <div key={index} className="px-5 py-4">
+              <div className="flex items-center gap-3">
+                <span className="rounded-lg border border-yellow-300/25 bg-yellow-300/10 px-2.5 py-1 text-[11px] font-black text-yellow-200">
+                  {scene.time}
+                </span>
+                <span className="text-xs font-black text-zinc-500">
+                  Cảnh {index + 1}
+                </span>
+              </div>
+              <dl className="mt-3 grid gap-2">
+                <div>
+                  <dt className="text-[10px] font-black uppercase text-zinc-600">
+                    Visual
+                  </dt>
+                  <dd className="mt-1 text-sm font-semibold leading-6 text-zinc-300">
+                    {scene.visual}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-[10px] font-black uppercase text-zinc-600">
+                    Voiceover
+                  </dt>
+                  <dd className="mt-1 text-sm font-semibold leading-6 text-white">
+                    {scene.voiceover}
+                  </dd>
+                </div>
+                {scene.overlayText ? (
+                  <div>
+                    <dt className="text-[10px] font-black uppercase text-zinc-600">
+                      Text trên màn hình
+                    </dt>
+                    <dd className="mt-1 inline-flex rounded-lg border border-yellow-300/20 bg-yellow-300/10 px-3 py-1 text-xs font-black text-yellow-100">
+                      {scene.overlayText}
+                    </dd>
+                  </div>
+                ) : null}
+              </dl>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="grid gap-4 sm:grid-cols-2">
+        <article className="relative overflow-hidden rounded-lg border border-white/10 bg-white/[0.055] p-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+          <div className="pointer-events-none absolute -right-16 -top-16 h-40 w-40 rounded-full bg-yellow-300/10 blur-3xl" />
+          <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-yellow-200/60 to-transparent" />
+          <div className="relative flex items-start justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <span className="flex h-8 w-8 items-center justify-center rounded-lg border border-yellow-300/25 bg-yellow-300/10 text-xs font-black text-yellow-200">
+                C
+              </span>
+              <p className="text-xs font-black uppercase text-yellow-200">CTA</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => copyToClipboard(script.cta, "cta")}
+              className="rounded-lg border border-white/10 bg-black/35 px-2.5 py-1 text-[11px] font-black text-zinc-400 transition hover:text-yellow-200 focus:outline-none"
+              aria-label="Sao chép CTA"
+            >
+              {copiedKey === "cta" ? "Đã chép" : "Chép"}
+            </button>
+          </div>
+          <p className="relative mt-4 text-sm font-semibold leading-7 text-zinc-200">
+            {script.cta}
+          </p>
+        </article>
+
+        <article className="relative overflow-hidden rounded-lg border border-white/10 bg-white/[0.055] p-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+          <div className="pointer-events-none absolute -right-16 -top-16 h-40 w-40 rounded-full bg-yellow-300/10 blur-3xl" />
+          <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-yellow-200/60 to-transparent" />
+          <div className="relative flex items-start justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <span className="flex h-8 w-8 items-center justify-center rounded-lg border border-yellow-300/25 bg-yellow-300/10 text-xs font-black text-yellow-200">
+                #
+              </span>
+              <p className="text-xs font-black uppercase text-yellow-200">Hashtags</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => copyToClipboard(script.hashtags.join(" "), "hashtags")}
+              className="rounded-lg border border-white/10 bg-black/35 px-2.5 py-1 text-[11px] font-black text-zinc-400 transition hover:text-yellow-200 focus:outline-none"
+              aria-label="Sao chép hashtag"
+            >
+              {copiedKey === "hashtags" ? "Đã chép" : "Chép"}
+            </button>
+          </div>
+          <p className="relative mt-4 text-sm font-bold leading-7 text-yellow-200/90">
+            {script.hashtags.join(" ")}
+          </p>
+        </article>
+      </div>
+
+      <article className="relative overflow-hidden rounded-lg border border-white/10 bg-white/[0.055] p-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+        <div className="pointer-events-none absolute -right-16 -top-16 h-40 w-40 rounded-full bg-yellow-300/10 blur-3xl" />
+        <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-yellow-200/60 to-transparent" />
+        <div className="relative flex items-start justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <span className="flex h-8 w-8 items-center justify-center rounded-lg border border-yellow-300/25 bg-yellow-300/10 text-xs font-black text-yellow-200">
+              C
+            </span>
+            <p className="text-xs font-black uppercase text-yellow-200">Caption</p>
+          </div>
+          <button
+            type="button"
+            onClick={() => copyToClipboard(script.caption, "caption")}
+            className="rounded-lg border border-white/10 bg-black/35 px-2.5 py-1 text-[11px] font-black text-zinc-400 transition hover:text-yellow-200 focus:outline-none"
+            aria-label="Sao chép caption"
+          >
+            {copiedKey === "caption" ? "Đã chép" : "Chép"}
+          </button>
+        </div>
+        <p className="relative mt-4 text-sm font-semibold leading-7 text-zinc-200">
+          {script.caption}
+        </p>
+      </article>
+    </div>
+  );
+}
+
+function VideoScriptLoadingSkeleton() {
+  return (
+    <div className="relative mt-6 space-y-4">
+      <div className="overflow-hidden rounded-lg border border-yellow-200/40 bg-yellow-300/10 p-5">
+        <div className="h-3 w-16 animate-pulse rounded-full bg-yellow-300/40" />
+        <div className="mt-4 h-3 w-full animate-pulse rounded-full bg-yellow-300/20" />
+        <div className="mt-3 h-3 w-3/4 animate-pulse rounded-full bg-yellow-300/20" />
+      </div>
+      {[1, 2, 3].map((item) => (
+        <div
+          key={item}
+          className="overflow-hidden rounded-lg border border-white/10 bg-white/[0.045] p-5"
+        >
+          <div className="h-3 w-20 animate-pulse rounded-full bg-yellow-300/30" />
+          <div className="mt-4 h-3 w-full animate-pulse rounded-full bg-white/10" />
+          <div className="mt-3 h-3 w-4/5 animate-pulse rounded-full bg-white/10" />
+          <div className="mt-3 h-3 w-2/3 animate-pulse rounded-full bg-white/10" />
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function RecentHistorySection({
   generations,
   isLoading,
@@ -1502,6 +2148,45 @@ function isGeneratedContent(
   );
 }
 
+function isGeneratedVideoScript(
+  value: GenerateVideoScriptResponse,
+): value is GeneratedVideoScript {
+  return (
+    "hook" in value &&
+    "scenes" in value &&
+    "cta" in value &&
+    "caption" in value &&
+    "hashtags" in value &&
+    typeof value.hook === "string" &&
+    Array.isArray(value.scenes) &&
+    value.scenes.length > 0 &&
+    typeof value.cta === "string" &&
+    typeof value.caption === "string" &&
+    Array.isArray(value.hashtags)
+  );
+}
+
+function isGeneratedHooks(
+  value: GenerateHooksResponse,
+): value is GeneratedHooks {
+  return (
+    "hooks" in value &&
+    Array.isArray(value.hooks) &&
+    value.hooks.length > 0 &&
+    value.hooks.every(
+      (item) =>
+        typeof (item as Record<string, unknown>).hook === "string" &&
+        typeof (item as Record<string, unknown>).angle === "string" &&
+        typeof (item as Record<string, unknown>).overlayText === "string",
+    ) &&
+    "caption" in value &&
+    typeof value.caption === "string" &&
+    "hashtags" in value &&
+    Array.isArray(value.hashtags) &&
+    value.hashtags.length >= 5
+  );
+}
+
 function isGeneratedImage(value: GenerateImageResponse): value is GeneratedImage {
   return (
     "imageDataUrl" in value &&
@@ -1513,6 +2198,574 @@ function isGeneratedImage(value: GenerateImageResponse): value is GeneratedImage
     typeof value.productName === "string" &&
     imageStyles.includes(value.style as ImageStyle) &&
     imagePlatforms.includes(value.platform as ImagePlatform)
+  );
+}
+
+function TikTokHooksSection({
+  supabase,
+  userId,
+  onUpgradeClick,
+}: {
+  supabase: SupabaseBrowserClient | null;
+  userId: string | null;
+  onUpgradeClick: (source: UpgradeSource) => void;
+}) {
+  const [productName, setProductName] = useState("Kem dưỡng da ban đêm");
+  const [category, setCategory] = useState<HookCategory>("Mỹ phẩm");
+  const [targetCustomer, setTargetCustomer] =
+    useState<HookTargetCustomer>("Nữ giới");
+  const [customerPain, setCustomerPain] = useState("");
+  const [tone, setTone] = useState<HookTone>("Gen Z");
+  const [isLoading, setIsLoading] = useState(false);
+  const [result, setResult] = useState<GeneratedHooks | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [productNameError, setProductNameError] = useState<string | null>(null);
+  const [accountPlan, setAccountPlan] = useState<AccountPlan>("free");
+  const [dailyUsage, setDailyUsage] = useState<DailyUsage | null>(null);
+  const isMountedRef = useRef(true);
+
+  useEffect(() => {
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
+
+  const fetchHooksUsage = useCallback(async () => {
+    if (!supabase || !userId) {
+      if (isMountedRef.current) {
+        setDailyUsage(null);
+        setAccountPlan("free");
+      }
+      return;
+    }
+
+    const todayRange = getVietnamTodayRange();
+    const { data: profile } = await supabase
+      .from("profiles")
+      .select("plan")
+      .eq("id", userId)
+      .maybeSingle()
+      .returns<{ plan: string | null } | null>();
+
+    if (!isMountedRef.current) return;
+
+    const { count } = await supabase
+      .from("generations")
+      .select("id", { count: "exact", head: true })
+      .eq("user_id", userId)
+      .eq("platform", "TikTok Hooks")
+      .gte("created_at", todayRange.startIso)
+      .lt("created_at", todayRange.endIso);
+
+    if (!isMountedRef.current) return;
+
+    const nextPlan = normalizeAccountPlan(profile?.plan);
+    const limit =
+      nextPlan === "pro" ? PRO_HOOKS_DAILY_LIMIT : FREE_HOOKS_DAILY_LIMIT;
+    const usedToday = count ?? 0;
+
+    setAccountPlan(nextPlan);
+    setDailyUsage({
+      dailyLimit: limit,
+      usedToday,
+      remainingToday: Math.max(limit - usedToday, 0),
+    });
+  }, [supabase, userId]);
+
+  useEffect(() => {
+    void Promise.resolve().then(fetchHooksUsage);
+  }, [fetchHooksUsage]);
+
+  async function handleGenerate(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    if (isLoading) return;
+
+    const nextProductNameError = getProductNameError(productName);
+    trackAnalyticsEvent("hooks_generate_clicked", {
+      category,
+      tone,
+      plan: accountPlan,
+      authenticated: Boolean(userId),
+    });
+
+    if (nextProductNameError) {
+      setResult(null);
+      setErrorMessage(null);
+      setProductNameError(nextProductNameError);
+      return;
+    }
+
+    setIsLoading(true);
+    setResult(null);
+    setErrorMessage(null);
+    setProductNameError(null);
+
+    try {
+      const response = await fetch("/api/generate-hooks", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          productName: productName.trim(),
+          category,
+          targetCustomer,
+          customerPain: customerPain.trim(),
+          tone,
+        }),
+      });
+      const data = (await response.json()) as GenerateHooksResponse;
+
+      if (!response.ok) {
+        if ("usage" in data && data.usage) {
+          setDailyUsage(data.usage);
+        }
+        throw new Error(
+          "error" in data && data.error
+            ? data.error
+            : "Không thể tạo hook. Vui lòng thử lại.",
+        );
+      }
+
+      if (!isGeneratedHooks(data)) {
+        throw new Error("API trả về định dạng không hợp lệ.");
+      }
+
+      setResult(data);
+      trackAnalyticsEvent("hooks_generation_success", {
+        category,
+        tone,
+        plan: accountPlan,
+        authenticated: Boolean(userId),
+      });
+      void fetchHooksUsage();
+    } catch (error) {
+      trackAnalyticsEvent("hooks_generation_failed", {
+        category,
+        tone,
+        plan: accountPlan,
+        authenticated: Boolean(userId),
+      });
+      setErrorMessage(
+        error instanceof Error
+          ? error.message
+          : "Không thể tạo hook. Vui lòng thử lại.",
+      );
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
+  return (
+    <section
+      id="tiktok-hooks"
+      aria-labelledby="tiktok-hooks-title"
+      className="relative isolate overflow-hidden border-b border-yellow-300/10 bg-[#060606]"
+    >
+      <div className="absolute inset-0 -z-10 bg-[radial-gradient(circle_at_20%_10%,rgba(250,204,21,0.14),transparent_30%),linear-gradient(180deg,#070707_0%,#020202_100%)]" />
+      <div className="absolute inset-0 -z-10 opacity-[0.14] [background-image:linear-gradient(rgba(250,204,21,0.2)_1px,transparent_1px),linear-gradient(90deg,rgba(250,204,21,0.14)_1px,transparent_1px)] [background-size:80px_80px] [mask-image:radial-gradient(circle_at_20%_20%,black,transparent_65%)]" />
+      <div className="absolute left-1/2 top-0 -z-10 h-px w-[72rem] -translate-x-1/2 bg-gradient-to-r from-transparent via-yellow-200/60 to-transparent" />
+
+      <div className="relative mx-auto max-w-7xl px-6 py-16 md:py-24">
+        <div className="grid gap-6 md:grid-cols-[0.9fr_1.1fr] md:items-end">
+          <div>
+            <p className="inline-flex rounded-lg border border-yellow-300/25 bg-yellow-300/10 px-3 py-2 text-xs font-extrabold uppercase text-yellow-100">
+              AI tạo hook TikTok bán hàng
+            </p>
+            <h2
+              id="tiktok-hooks-title"
+              className="mt-6 max-w-3xl text-4xl font-black leading-[1.05] text-white md:text-5xl"
+            >
+              10 hook TikTok bán hàng trong vài giây.
+            </h2>
+          </div>
+          <p className="text-base font-semibold leading-8 text-zinc-400">
+            Nhập sản phẩm, mô tả nỗi đau khách hàng và chọn tone. AI tạo 10
+            hook mở đầu video mạnh trong 3 giây đầu, kèm angle, text màn hình,
+            caption và hashtag.
+          </p>
+        </div>
+
+        <div className="mt-10 grid gap-6 lg:grid-cols-[0.9fr_1.1fr]">
+          <form
+            onSubmit={handleGenerate}
+            aria-label="Tạo hook TikTok bán hàng bằng AI"
+            className="relative overflow-hidden rounded-lg border border-white/10 bg-[linear-gradient(145deg,rgba(22,22,22,0.96),rgba(5,5,5,0.96))] p-6 shadow-[0_30px_90px_rgba(0,0,0,0.52)] md:p-7"
+          >
+            <div className="pointer-events-none absolute -right-24 -top-24 h-56 w-56 rounded-full bg-yellow-300/10 blur-3xl" />
+            <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-yellow-200/70 to-transparent" />
+
+            <div className="relative flex items-center justify-between gap-4 border-b border-white/10 pb-5">
+              <PanelTitle
+                title="Hook brief"
+                description="Sản phẩm + khách hàng + nỗi đau"
+              />
+              <StatusPill className="border-yellow-300/25 bg-yellow-300/10 text-yellow-100">
+                10 hooks
+              </StatusPill>
+            </div>
+
+            <div className="relative mt-7 space-y-5">
+              <label className="block">
+                <span className={fieldLabelClassName}>Tên sản phẩm</span>
+                <input
+                  value={productName}
+                  onChange={(event) => {
+                    const next = event.target.value;
+                    setProductName(next);
+                    if (productNameError) {
+                      setProductNameError(getProductNameError(next));
+                    }
+                  }}
+                  placeholder="Ví dụ: Kem dưỡng da ban đêm"
+                  aria-describedby={
+                    productNameError ? "hooks-product-name-error" : undefined
+                  }
+                  aria-invalid={Boolean(productNameError)}
+                  className={`${formControlClassName} placeholder:text-zinc-600`}
+                />
+                {productNameError ? (
+                  <p
+                    id="hooks-product-name-error"
+                    className="mt-2 text-xs font-bold leading-5 text-red-200"
+                  >
+                    {productNameError}
+                  </p>
+                ) : null}
+              </label>
+
+              <div className="grid gap-5 sm:grid-cols-2">
+                <label className="block">
+                  <span className={fieldLabelClassName}>Ngành hàng</span>
+                  <select
+                    value={category}
+                    onChange={(event) =>
+                      setCategory(event.target.value as HookCategory)
+                    }
+                    className={formControlClassName}
+                  >
+                    {hookCategories.map((item) => (
+                      <option key={item}>{item}</option>
+                    ))}
+                  </select>
+                </label>
+
+                <label className="block">
+                  <span className={fieldLabelClassName}>
+                    Khách hàng mục tiêu
+                  </span>
+                  <select
+                    value={targetCustomer}
+                    onChange={(event) =>
+                      setTargetCustomer(event.target.value as HookTargetCustomer)
+                    }
+                    className={formControlClassName}
+                  >
+                    {hookTargetCustomers.map((item) => (
+                      <option key={item}>{item}</option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+
+              <label className="block">
+                <span className={fieldLabelClassName}>
+                  Nỗi đau khách hàng (tuỳ chọn)
+                </span>
+                <textarea
+                  value={customerPain}
+                  onChange={(event) => {
+                    if (
+                      event.target.value.length <= MAX_CUSTOMER_PAIN_LENGTH
+                    ) {
+                      setCustomerPain(event.target.value);
+                    }
+                  }}
+                  placeholder="Ví dụ: Da khô bong tróc vào mùa đông, thử nhiều kem vẫn không đỡ"
+                  rows={3}
+                  className="mt-3 w-full resize-none rounded-lg border border-white/10 bg-white/[0.045] px-5 py-3 text-sm font-semibold text-white outline-none transition duration-300 hover:border-yellow-300/35 hover:bg-white/[0.06] focus:border-yellow-300 focus:bg-black/80 focus:shadow-[0_0_0_4px_rgba(250,204,21,0.12),0_18px_45px_rgba(250,204,21,0.08)] placeholder:text-zinc-600"
+                />
+                <p className="mt-1 text-right text-xs font-semibold text-zinc-600">
+                  {customerPain.length}/{MAX_CUSTOMER_PAIN_LENGTH}
+                </p>
+              </label>
+
+              <label className="block">
+                <span className={fieldLabelClassName}>Tone</span>
+                <select
+                  value={tone}
+                  onChange={(event) =>
+                    setTone(event.target.value as HookTone)
+                  }
+                  className={formControlClassName}
+                >
+                  {hookTones.map((item) => (
+                    <option key={item}>{item}</option>
+                  ))}
+                </select>
+              </label>
+
+              <button
+                type="submit"
+                disabled={isLoading}
+                className="group relative inline-flex h-14 w-full items-center justify-center overflow-hidden rounded-lg bg-[linear-gradient(135deg,#fde68a_0%,#facc15_40%,#d97706_100%)] px-6 text-sm font-black text-black shadow-[0_20px_55px_rgba(250,204,21,0.24)] transition duration-500 ease-out hover:-translate-y-1 hover:shadow-[0_26px_80px_rgba(250,204,21,0.38)] disabled:cursor-not-allowed disabled:opacity-70 disabled:hover:translate-y-0"
+              >
+                <span className="absolute inset-y-0 -left-20 w-16 rotate-12 bg-white/35 blur-md transition duration-700 group-hover:left-[115%]" />
+                <span className="relative flex items-center gap-2 transition duration-500 group-hover:scale-[1.02]">
+                  {isLoading ? "Đang tạo hook..." : "Tạo 10 hook"}
+                  <span aria-hidden="true">-&gt;</span>
+                </span>
+              </button>
+
+              <div className="flex flex-col gap-3 text-xs font-bold leading-5 text-zinc-500 sm:flex-row sm:items-center sm:justify-between">
+                {userId ? (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <StatusPill className="border-yellow-300/25 bg-yellow-300/10 text-yellow-100">
+                      {getAccountPlanLabel(accountPlan)}
+                    </StatusPill>
+                    {dailyUsage ? (
+                      <p className="text-yellow-100">
+                        Hook: còn {dailyUsage.remainingToday}/
+                        {dailyUsage.dailyLimit} lượt hôm nay
+                      </p>
+                    ) : (
+                      <p>Đang tải lượt còn lại...</p>
+                    )}
+                  </div>
+                ) : (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <StatusPill className="border-white/10 bg-white/[0.04] text-zinc-300">
+                      Gói Free
+                    </StatusPill>
+                    <p>
+                      Khách vẫn dùng được {FREE_HOOKS_DAILY_LIMIT} lần/ngày.
+                    </p>
+                  </div>
+                )}
+                {accountPlan === "free" ? (
+                  <button
+                    type="button"
+                    onClick={() => onUpgradeClick("generator_usage")}
+                    className="inline-flex h-10 items-center justify-center rounded-full border border-yellow-300/35 bg-yellow-300/10 px-4 text-xs font-black text-yellow-200 transition hover:border-yellow-300 hover:bg-yellow-300 hover:text-black focus:outline-none focus:ring-2 focus:ring-yellow-300/60"
+                  >
+                    Nâng cấp Pro
+                  </button>
+                ) : null}
+              </div>
+            </div>
+          </form>
+
+          <div className="relative overflow-hidden rounded-lg border border-yellow-300/18 bg-[linear-gradient(145deg,rgba(18,18,18,0.96),rgba(4,4,4,0.98)_58%,rgba(28,19,5,0.92))] p-6 shadow-[0_30px_110px_rgba(250,204,21,0.12)] md:p-7">
+            <div className="pointer-events-none absolute -left-24 -top-24 h-72 w-72 rounded-full bg-yellow-300/12 blur-3xl" />
+            <div className="pointer-events-none absolute inset-x-8 top-0 h-px bg-gradient-to-r from-transparent via-yellow-200 to-transparent" />
+
+            <div className="relative flex flex-col gap-4 border-b border-white/10 pb-5 sm:flex-row sm:items-center sm:justify-between">
+              <PanelTitle
+                title="Hook output"
+                description="10 hooks + caption + hashtag"
+              />
+              <div className="flex flex-wrap gap-2">
+                <StatusPill className="border-white/10 bg-white text-black">
+                  {category}
+                </StatusPill>
+                <StatusPill className="border-yellow-300/25 bg-yellow-300/10 text-yellow-100">
+                  {tone}
+                </StatusPill>
+              </div>
+            </div>
+
+            <div aria-live="polite">
+              {errorMessage ? (
+                <div
+                  role="alert"
+                  className="relative mt-6 overflow-hidden rounded-lg border border-red-400/30 bg-red-500/[0.08] p-5 shadow-[inset_0_1px_0_rgba(248,113,113,0.18)]"
+                >
+                  <div className="absolute -right-16 -top-16 h-40 w-40 rounded-full bg-red-400/10 blur-3xl" />
+                  <p className="relative text-sm font-black text-red-200">
+                    Không tạo được hook
+                  </p>
+                  <p className="relative mt-2 text-sm leading-6 text-zinc-300">
+                    {errorMessage}
+                  </p>
+                </div>
+              ) : isLoading ? (
+                <HooksLoadingSkeleton />
+              ) : result ? (
+                <HooksOutput result={result} />
+              ) : (
+                <div className="relative mt-6 overflow-hidden rounded-lg border border-dashed border-yellow-300/30 bg-yellow-300/[0.045] p-8 text-center shadow-[inset_0_1px_0_rgba(250,204,21,0.18)]">
+                  <div className="absolute left-1/2 top-0 h-24 w-64 -translate-x-1/2 rounded-full bg-yellow-300/10 blur-3xl" />
+                  <p className="relative text-xl font-black text-white">
+                    10 hook TikTok sẽ xuất hiện ở đây.
+                  </p>
+                  <p className="relative mt-3 text-sm leading-6 text-zinc-400">
+                    Hook, angle, text màn hình, caption và hashtag bán hàng.
+                  </p>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function HooksOutput({ result }: { result: GeneratedHooks }) {
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
+
+  function copyToClipboard(text: string, key: string) {
+    void navigator.clipboard.writeText(text).then(() => {
+      setCopiedKey(key);
+      setTimeout(() => setCopiedKey(null), 1800);
+    });
+  }
+
+  return (
+    <div className="relative mt-6 space-y-3">
+      <div className="overflow-hidden rounded-lg border border-white/10 bg-white/[0.055]">
+        <div className="flex items-center gap-3 border-b border-white/10 px-5 py-4">
+          <span className="flex h-8 w-8 items-center justify-center rounded-lg border border-yellow-300/25 bg-yellow-300/10 text-xs font-black text-yellow-200">
+            H
+          </span>
+          <p className="text-xs font-black uppercase text-yellow-200">
+            10 Hooks
+          </p>
+        </div>
+        <div className="divide-y divide-white/[0.06]">
+          {result.hooks.map((item, index) => (
+            <div key={index} className="px-5 py-4">
+              <div className="flex items-start justify-between gap-3">
+                <div className="flex items-start gap-2">
+                  <span className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-yellow-300/10 text-[11px] font-black text-yellow-200">
+                    {index + 1}
+                  </span>
+                  <p className="text-sm font-semibold leading-6 text-white">
+                    {item.hook}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => copyToClipboard(item.hook, `hook-${index}`)}
+                  className="shrink-0 rounded-lg border border-white/10 bg-black/35 px-2.5 py-1 text-[11px] font-black text-zinc-400 transition hover:text-yellow-200 focus:outline-none"
+                  aria-label={`Sao chép hook ${index + 1}`}
+                >
+                  {copiedKey === `hook-${index}` ? "Đã chép" : "Chép"}
+                </button>
+              </div>
+              <dl className="mt-2 grid gap-1 pl-8">
+                <div className="flex items-start gap-2">
+                  <dt className="shrink-0 text-[10px] font-black uppercase text-zinc-600">
+                    Angle
+                  </dt>
+                  <dd className="text-xs font-semibold leading-5 text-zinc-400">
+                    {item.angle}
+                  </dd>
+                </div>
+                {item.overlayText ? (
+                  <div className="flex items-start gap-2">
+                    <dt className="shrink-0 text-[10px] font-black uppercase text-zinc-600">
+                      Text
+                    </dt>
+                    <dd>
+                      <span className="inline-flex rounded-md border border-yellow-300/20 bg-yellow-300/10 px-2 py-0.5 text-[11px] font-black text-yellow-100">
+                        {item.overlayText}
+                      </span>
+                    </dd>
+                  </div>
+                ) : null}
+              </dl>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="grid gap-3 sm:grid-cols-2">
+        <article className="relative overflow-hidden rounded-lg border border-white/10 bg-white/[0.055] p-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+          <div className="pointer-events-none absolute -right-16 -top-16 h-40 w-40 rounded-full bg-yellow-300/10 blur-3xl" />
+          <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-yellow-200/60 to-transparent" />
+          <div className="relative flex items-start justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <span className="flex h-8 w-8 items-center justify-center rounded-lg border border-yellow-300/25 bg-yellow-300/10 text-xs font-black text-yellow-200">
+                C
+              </span>
+              <p className="text-xs font-black uppercase text-yellow-200">
+                Caption
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => copyToClipboard(result.caption, "caption")}
+              className="rounded-lg border border-white/10 bg-black/35 px-2.5 py-1 text-[11px] font-black text-zinc-400 transition hover:text-yellow-200 focus:outline-none"
+              aria-label="Sao chép caption"
+            >
+              {copiedKey === "caption" ? "Đã chép" : "Chép"}
+            </button>
+          </div>
+          <p className="relative mt-4 text-sm font-semibold leading-7 text-zinc-200">
+            {result.caption}
+          </p>
+        </article>
+
+        <article className="relative overflow-hidden rounded-lg border border-white/10 bg-white/[0.055] p-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+          <div className="pointer-events-none absolute -right-16 -top-16 h-40 w-40 rounded-full bg-yellow-300/10 blur-3xl" />
+          <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-yellow-200/60 to-transparent" />
+          <div className="relative flex items-start justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <span className="flex h-8 w-8 items-center justify-center rounded-lg border border-yellow-300/25 bg-yellow-300/10 text-xs font-black text-yellow-200">
+                #
+              </span>
+              <p className="text-xs font-black uppercase text-yellow-200">
+                Hashtags
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() =>
+                copyToClipboard(result.hashtags.join(" "), "hashtags")
+              }
+              className="rounded-lg border border-white/10 bg-black/35 px-2.5 py-1 text-[11px] font-black text-zinc-400 transition hover:text-yellow-200 focus:outline-none"
+              aria-label="Sao chép hashtag"
+            >
+              {copiedKey === "hashtags" ? "Đã chép" : "Chép"}
+            </button>
+          </div>
+          <p className="relative mt-4 text-sm font-bold leading-7 text-yellow-200/90">
+            {result.hashtags.join(" ")}
+          </p>
+        </article>
+      </div>
+    </div>
+  );
+}
+
+function HooksLoadingSkeleton() {
+  return (
+    <div className="relative mt-6 space-y-3">
+      <div className="overflow-hidden rounded-lg border border-white/10 bg-white/[0.045] p-5">
+        <div className="h-3 w-16 animate-pulse rounded-full bg-yellow-300/30" />
+        {[1, 2, 3, 4, 5].map((item) => (
+          <div
+            key={item}
+            className="mt-4 border-t border-white/[0.06] pt-4 first:mt-0 first:border-0 first:pt-0"
+          >
+            <div className="h-3 w-full animate-pulse rounded-full bg-white/10" />
+            <div className="mt-2 h-3 w-3/4 animate-pulse rounded-full bg-white/[0.06]" />
+          </div>
+        ))}
+      </div>
+      <div className="grid gap-3 sm:grid-cols-2">
+        {[1, 2].map((item) => (
+          <div
+            key={item}
+            className="overflow-hidden rounded-lg border border-white/10 bg-white/[0.045] p-5"
+          >
+            <div className="h-3 w-20 animate-pulse rounded-full bg-yellow-300/30" />
+            <div className="mt-4 h-3 w-full animate-pulse rounded-full bg-white/10" />
+            <div className="mt-3 h-3 w-4/5 animate-pulse rounded-full bg-white/10" />
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -1532,6 +2785,7 @@ export default function Home() {
   const [authMessage, setAuthMessage] = useState<string | null>(null);
   const [isAuthLoading, setIsAuthLoading] = useState(false);
   const [isUpgradeOpen, setIsUpgradeOpen] = useState(false);
+  const [generatorTab, setGeneratorTab] = useState<GeneratorTab>("content");
 
   useEffect(() => {
     if (!supabase) {
@@ -1857,17 +3111,82 @@ export default function Home() {
         </div>
       </section>
 
-      <GeneratorDemoSection
-        supabase={supabase}
-        userId={userId}
-        onUpgradeClick={handleUpgradeClick}
-      />
+      <div id="generators">
+        <div className="border-b border-yellow-300/10 bg-black">
+          <div className="mx-auto max-w-7xl px-6 py-3">
+            <div
+              className="flex gap-1 overflow-x-auto pb-0.5"
+              role="tablist"
+              aria-label="Chọn công cụ AI"
+            >
+              {generatorTabs.map((tab) => (
+                <button
+                  key={tab.id}
+                  type="button"
+                  role="tab"
+                  aria-selected={generatorTab === tab.id}
+                  onClick={() => setGeneratorTab(tab.id)}
+                  className={`shrink-0 rounded-lg border px-4 py-2 text-xs font-black transition duration-200 focus:outline-none focus:ring-2 focus:ring-yellow-300/60 ${
+                    generatorTab === tab.id
+                      ? "border-yellow-300/40 bg-yellow-300/10 text-yellow-100 shadow-[0_0_20px_rgba(250,204,21,0.10)]"
+                      : "border-transparent text-zinc-500 hover:border-white/10 hover:text-white"
+                  }`}
+                >
+                  {tab.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
 
-      <ImageGenerationSection
-        supabase={supabase}
-        userId={userId}
-        onUpgradeClick={handleUpgradeClick}
-      />
+        <div
+          role="tabpanel"
+          className={generatorTab !== "content" ? "hidden" : ""}
+          aria-hidden={generatorTab !== "content"}
+        >
+          <GeneratorDemoSection
+            supabase={supabase}
+            userId={userId}
+            onUpgradeClick={handleUpgradeClick}
+          />
+        </div>
+
+        <div
+          role="tabpanel"
+          className={generatorTab !== "image" ? "hidden" : ""}
+          aria-hidden={generatorTab !== "image"}
+        >
+          <ImageGenerationSection
+            supabase={supabase}
+            userId={userId}
+            onUpgradeClick={handleUpgradeClick}
+          />
+        </div>
+
+        <div
+          role="tabpanel"
+          className={generatorTab !== "video-script" ? "hidden" : ""}
+          aria-hidden={generatorTab !== "video-script"}
+        >
+          <VideoScriptSection
+            supabase={supabase}
+            userId={userId}
+            onUpgradeClick={handleUpgradeClick}
+          />
+        </div>
+
+        <div
+          role="tabpanel"
+          className={generatorTab !== "tiktok-hooks" ? "hidden" : ""}
+          aria-hidden={generatorTab !== "tiktok-hooks"}
+        >
+          <TikTokHooksSection
+            supabase={supabase}
+            userId={userId}
+            onUpgradeClick={handleUpgradeClick}
+          />
+        </div>
+      </div>
 
       <section
         id="features"
